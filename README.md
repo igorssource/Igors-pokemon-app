@@ -7,7 +7,7 @@ Die App läuft im Chrome-Browser und lässt sich wie eine normale App auf den St
 ## Was die App kann
 
 - **Zwei Sammlungen:** oben zwischen **Max** und **Tim** umschalten.
-- **Karten scannen:** Foto aufnehmen (oder aus der Galerie), dann *1 Karte*, *4 Karten* (2×2) oder
+- **Karten scannen:** Foto direkt in der App aufnehmen (oder aus der Galerie), dann *1 Karte*, *4 Karten* (2×2) oder
   *9 Karten* (3×3 Album-Seite) wählen und mit den gelben Ecken den Rahmen um die Karten legen.
   Die App schneidet jede Karte einzeln aus und liest per Texterkennung die **Kartennummer**
   (z. B. `025/165`), das **Set-Kürzel** (z. B. `MEW`) und den Namen.
@@ -20,7 +20,9 @@ Die App läuft im Chrome-Browser und lässt sich wie eine normale App auf den St
   *Von Hand* eintippen.
 - **Preis anzeigen:** In der Kartenansicht lädt der Knopf den aktuellen Cardmarket-Trendpreis (€)
   und den TCGplayer-Preis ($). Preise werden nie automatisch geladen.
-- **Offline-Hinweis:** Ohne Internet erscheint oben ein gelber Hinweis.
+- **Offline-Hinweis:** Ohne Internet erscheint oben ein gelber Hinweis. Ist nur die Kartendatenbank
+  langsam oder überlastet, versucht die App es automatisch mehrmals und sagt das auch so.
+- **Nichts geht verloren:** Lädt Android den Tab mitten im Scan neu, sind Foto und Ergebnisse danach wieder da.
 - **Sicherung:** Unter ⚙️ lässt sich die Sammlung als Datei speichern und wieder laden.
 
 ## Auf das Handy bringen

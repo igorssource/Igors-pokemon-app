@@ -45,10 +45,8 @@
       <div class="step" id="scanStepPick">
         <h2>Karten fotografieren</h2>
         <p class="hint">Lege die Karten gut beleuchtet auf den Tisch oder fotografiere eine ganze Album-Seite. Die Kartennummer unten auf der Karte sollte gut lesbar sein.</p>
-        <label class="big-btn primary">
-          📷 Foto aufnehmen
-          <input type="file" accept="image/*" capture="environment" id="cameraInput" hidden>
-        </label>
+        <button class="big-btn primary" id="cameraBtn">📷 Foto aufnehmen</button>
+        <input type="file" accept="image/*" capture="environment" id="cameraInput" hidden>
         <label class="big-btn">
           🖼️ Foto aus der Galerie wählen
           <input type="file" accept="image/*" id="fileInput" hidden>
@@ -142,6 +140,17 @@
       </div>
     </div>
   </dialog>
+
+  <!-- Kamera in der App -->
+  <div class="camera" id="cameraOverlay" hidden>
+    <video id="cameraVideo" playsinline muted autoplay></video>
+    <div class="camera-hint">Karten flach hinlegen, Handy gerade darüber halten</div>
+    <div class="camera-bar">
+      <button class="camera-close" id="cameraClose" aria-label="Kamera schließen">✕</button>
+      <button class="shutter" id="cameraShutter" aria-label="Foto aufnehmen"></button>
+      <span class="camera-spacer"></span>
+    </div>
+  </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 

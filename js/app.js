@@ -1,6 +1,7 @@
 import * as store from './store.js';
 import { findCards, fetchPrice, normalizeNumber, OfflineError } from './api.js';
-import { loadImage, splitGrid, readCard, getOcrWorker, parseNumberText } from './scanner.js';
+import { loadImage, toCanvas, cropCell, freeCanvas, readCard, getOcrWorker, parseNumberText } from './scanner.js';
+import * as scanState from './scan-state.js';
 
 const $ = sel => document.querySelector(sel);
 const el = (tag, attrs = {}, ...children) => {
@@ -48,11 +49,11 @@ function updateOnline() {
 addEventListener('online', updateOnline);
 addEventListener('offline', updateOnline);
 
-function showView(name) {
+function showView(name, { keepScan = false } = {}) {
   for (const v of document.querySelectorAll('.view')) v.hidden = v.id !== `view-${name}`;
   for (const b of document.querySelectorAll('.bottombar button')) b.classList.toggle('active', b.dataset.view === name);
   if (name === 'collection') renderCollection();
-  if (name === 'scan') resetScan();
+  if (name === 'scan' && !keepScan && !scan.source && !scan.items.length) resetScan();
   scrollTo(0, 0);
 }
 
@@ -168,27 +169,111 @@ function showScanStep(id) {
 }
 
 function resetScan() {
+  freeCanvas(scan.source);
   scan.source = null;
   scan.items = [];
   $('#cameraInput').value = '';
   $('#fileInput').value = '';
+  scanState.clearScan();
   showScanStep('scanStepPick');
+}
+
+function persistScan(step) {
+  scanState.saveMeta({ step, rect: scan.rect, layout: scan.layout, items: scan.items });
 }
 
 async function onPhoto(e) {
   const file = e.target.files?.[0];
   if (!file) return;
+  let canvas;
   try {
-    scan.source = await loadImage(file);
+    canvas = await loadImage(file);
   } catch {
     toast('Das Foto konnte nicht geöffnet werden.');
     return;
   }
-  const { width: w, height: h } = scan.source;
+  startWithPhoto(canvas);
+}
+
+function startWithPhoto(canvas) {
+  freeCanvas(scan.source);
+  scan.source = canvas;
+  const { width: w, height: h } = canvas;
   scan.rect = { x: w * 0.02, y: h * 0.02, w: w * 0.96, h: h * 0.96 };
+  scan.items = [];
   showScanStep('scanStepGrid');
   setLayout(scan.layout);
+  scanState.savePhoto(canvas).catch(() => {});
+  persistScan('grid');
   getOcrWorker().catch(() => {}); // Texterkennung schon mal im Hintergrund laden
+}
+
+// Nach einem Neuladen des Tabs: angefangenen Scan wiederherstellen
+async function restoreScan() {
+  const meta = scanState.loadMeta();
+  if (!meta) return false;
+  try {
+    if (meta.step === 'results' && meta.items?.length) {
+      scan.items = meta.items;
+      scan.layout = meta.layout || scan.layout;
+      showView('scan', { keepScan: true });
+      renderResults();
+      showScanStep('scanStepResults');
+      return true;
+    }
+    const blob = await scanState.loadPhoto();
+    if (!blob) return false;
+    scan.source = await loadImage(blob);
+    scan.rect = meta.rect;
+    scan.layout = meta.layout || scan.layout;
+    showView('scan', { keepScan: true });
+    showScanStep('scanStepGrid');
+    setLayout(scan.layout);
+    toast('Dein Foto ist noch da. Weiter geht\'s!');
+    return true;
+  } catch {
+    scanState.clearScan();
+    return false;
+  }
+}
+
+// ---------- Kamera direkt in der App ----------
+// Die Kamera läuft im Browser selbst. So muss Android nicht in die Kamera-App
+// wechseln, wobei es den Browser-Tab sonst manchmal beendet.
+
+let cameraStream = null;
+
+async function openCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) { $('#cameraInput').click(); return; }
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 2560 }, height: { ideal: 1920 } },
+    });
+  } catch {
+    toast('Die Kamera ist nicht freigegeben. Ich öffne die normale Kamera-App.');
+    $('#cameraInput').click();
+    return;
+  }
+  const video = $('#cameraVideo');
+  video.srcObject = cameraStream;
+  $('#cameraOverlay').hidden = false;
+  await video.play().catch(() => {});
+}
+
+function closeCamera() {
+  cameraStream?.getTracks().forEach(t => t.stop());
+  cameraStream = null;
+  $('#cameraVideo').srcObject = null;
+  $('#cameraOverlay').hidden = true;
+}
+
+function takePicture() {
+  const video = $('#cameraVideo');
+  if (!video.videoWidth) return;
+  const canvas = toCanvas(video, video.videoWidth, video.videoHeight);
+  closeCamera();
+  startWithPhoto(canvas);
 }
 
 function setLayout(layout) {
@@ -303,7 +388,8 @@ function thumb(canvas) {
 
 async function recognize() {
   const [rows, cols] = layoutDims();
-  const cells = splitGrid(scan.source, scan.rect, rows, cols);
+  const count = rows * cols;
+  persistScan('grid');
   showScanStep('scanStepProgress');
   const bar = $('#progressBar');
   const text = $('#progressText');
@@ -314,26 +400,34 @@ async function recognize() {
   try {
     await getOcrWorker();
   } catch {
-    toast('Die Texterkennung konnte nicht geladen werden. Bitte Internetverbindung prüfen.');
+    toast('Die Texterkennung konnte nicht gestartet werden. Bitte die Seite neu laden und nochmal versuchen.');
     showScanStep('scanStepGrid');
     return;
   }
 
-  for (let i = 0; i < cells.length; i++) {
-    text.textContent = `Karte ${i + 1} von ${cells.length} …`;
-    const item = { thumb: thumb(cells[i]), read: {}, candidates: [], chosenId: null, include: false, error: '' };
+  for (let i = 0; i < count; i++) {
+    text.textContent = `Karte ${i + 1} von ${count} …`;
+    const cell = cropCell(scan.source, scan.rect, rows, cols, i); // immer nur eine Karte im Speicher
+    const item = { thumb: thumb(cell), read: {}, candidates: [], chosenId: null, include: false, error: '' };
     try {
-      item.read = await readCard(cells[i]);
-      if (item.read.number || item.read.name) {
+      item.read = await readCard(cell);
+    } catch {
+      item.error = 'Die Karte konnte nicht gelesen werden.';
+    }
+    freeCanvas(cell);
+    if (!item.error && (item.read.number || item.read.name)) {
+      text.textContent = `Karte ${i + 1} von ${count}: suche in der Datenbank …`;
+      try {
         item.candidates = await findCards(item.read);
+      } catch (err) {
+        item.error = errorText(err);
       }
-    } catch (err) {
-      item.error = errorText(err);
     }
     preselect(item);
     scan.items.push(item);
-    bar.style.width = `${Math.round(((i + 1) / cells.length) * 100)}%`;
+    bar.style.width = `${Math.round(((i + 1) / count) * 100)}%`;
   }
+  persistScan('results');
   renderResults();
   showScanStep('scanStepResults');
 }
@@ -360,6 +454,7 @@ function renderResults() {
   const box = $('#scanResults');
   box.replaceChildren(...scan.items.map((item, i) => renderResult(item, i)));
   const n = scan.items.filter(it => it.include && it.chosenId).length;
+  persistScan('results');
   const btn = $('#scanSave');
   btn.textContent = n ? `✅ ${n} ${n === 1 ? 'Karte' : 'Karten'} speichern` : 'Nichts zu speichern';
   btn.disabled = n === 0;
@@ -447,6 +542,7 @@ function saveScan() {
     if (card && item.include) { store.addCard(card); added++; }
   }
   toast(`${added} ${added === 1 ? 'Karte' : 'Karten'} in der Sammlung von ${store.getActiveProfile().name} gespeichert 🎉`);
+  resetScan();
   showView('collection');
 }
 
@@ -548,6 +644,9 @@ function init() {
   for (const b of document.querySelectorAll('.bottombar button')) b.addEventListener('click', () => showView(b.dataset.view));
   $('#collectionFilter').addEventListener('input', renderCollection);
 
+  $('#cameraBtn').addEventListener('click', openCamera);
+  $('#cameraShutter').addEventListener('click', takePicture);
+  $('#cameraClose').addEventListener('click', closeCamera);
   $('#cameraInput').addEventListener('change', onPhoto);
   $('#fileInput').addEventListener('change', onPhoto);
   $('#manualFromScan').addEventListener('click', () => showView('manual'));
@@ -570,6 +669,7 @@ function init() {
   $('#importInput').addEventListener('change', importData);
 
   showView('collection');
+  restoreScan();
 
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }

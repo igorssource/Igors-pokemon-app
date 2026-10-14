@@ -11,22 +11,60 @@ export class OfflineError extends Error {
   constructor() { super('Keine Internetverbindung'); this.name = 'OfflineError'; }
 }
 
+export class ApiError extends Error {
+  constructor(message) { super(message); this.name = 'ApiError'; }
+}
+
+const TIMEOUT_MS = 20000;
+const RETRIES = 3;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Die API ist manchmal langsam oder antwortet mit 429 (zu viele Anfragen pro
+// Minute, besonders ohne API-Schlüssel) bzw. 5xx. Solche Antworten kommen oft
+// ohne CORS-Header an, dann meldet der Browser nur "Failed to fetch" – das ist
+// KEIN fehlendes WLAN. Daher: mehrfach mit Pause wiederholen und nur dann
+// "offline" melden, wenn das Handy wirklich keine Verbindung hat.
 async function request(path, params = {}) {
-  if (!navigator.onLine) throw new OfflineError();
   const url = new URL(BASE + path);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   const headers = {};
   const key = getSetting('apiKey');
   if (key) headers['X-Api-Key'] = key;
-  let res;
-  try {
-    res = await fetch(url, { headers });
-  } catch {
-    throw new OfflineError();
+
+  let lastProblem = '';
+  for (let attempt = 0; attempt <= RETRIES; attempt++) {
+    if (attempt > 0 && lastProblem !== 'busy') await sleep(attempt * 3000);
+    if (!navigator.onLine) throw new OfflineError();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { headers, signal: ctrl.signal });
+      if (res.ok) return await res.json();
+      if (res.status === 404) throw new ApiError('Diese Karte gibt es in der Datenbank nicht.');
+      if (res.status === 429) {
+        // Limit pro Minute erreicht: so lange warten, wie der Server sagt (sonst 6 s)
+        lastProblem = 'busy';
+        const wait = Number(res.headers.get('Retry-After'));
+        await sleep(Number.isFinite(wait) && wait > 0 ? Math.min(wait, 30) * 1000 : 6000);
+        continue;
+      }
+      if (res.status >= 500) { lastProblem = 'down'; continue; }
+      throw new ApiError(`Die Kartendatenbank hat die Anfrage abgelehnt (Fehler ${res.status}).`);
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      lastProblem = err.name === 'AbortError' ? 'slow' : 'down';
+    } finally {
+      clearTimeout(timer);
+    }
   }
-  if (res.status === 429) throw new Error('Die Kartendatenbank hat zu viele Anfragen bekommen. Bitte gleich nochmal versuchen.');
-  if (!res.ok) throw new Error(`Die Kartendatenbank antwortet nicht (Fehler ${res.status}).`);
-  return res.json();
+  if (!navigator.onLine) throw new OfflineError();
+  if (lastProblem === 'busy') {
+    throw new ApiError(key
+      ? 'Die Kartendatenbank ist gerade überlastet. Bitte gleich nochmal versuchen.'
+      : 'Zu viele Anfragen auf einmal. Bitte kurz warten – mit einem kostenlosen API-Schlüssel (⚙️) passiert das seltener.');
+  }
+  if (lastProblem === 'slow') throw new ApiError('Die Kartendatenbank antwortet gerade sehr langsam. Bitte gleich nochmal versuchen.');
+  throw new ApiError('Die Kartendatenbank ist gerade nicht erreichbar. Bitte gleich nochmal versuchen.');
 }
 
 // "025" -> "25", "TG05" bleibt "TG05"
@@ -37,9 +75,14 @@ export function normalizeNumber(num) {
 
 const quote = s => `"${String(s).replace(/"/g, '')}"`;
 
+const queryCache = new Map(); // gleiche Suche nicht zweimal schicken (spart Anfragen)
+
 async function query(q) {
+  if (queryCache.has(q)) return queryCache.get(q);
   const data = await request('/cards', { q, pageSize: 30, select: CARD_FIELDS, orderBy: '-set.releaseDate' });
-  return data.data || [];
+  const cards = data.data || [];
+  queryCache.set(q, cards);
+  return cards;
 }
 
 /**

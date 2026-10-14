@@ -228,6 +228,17 @@ dialog.sheet::backdrop { background: rgba(10, 15, 30, .55); }
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+/* Kamera in der App */
+.camera { position: fixed; inset: 0; z-index: 100; background: #000; display: flex; flex-direction: column; }
+.camera[hidden] { display: none; }
+.camera video { flex: 1; min-height: 0; width: 100%; object-fit: contain; }
+.camera-hint { position: absolute; top: calc(12px + env(safe-area-inset-top)); left: 16px; right: 16px; text-align: center; color: #fff; background: rgba(0,0,0,.45); border-radius: 12px; padding: 8px; font-size: .95rem; }
+.camera-bar { display: flex; align-items: center; justify-content: space-between; padding: 16px 28px calc(20px + env(safe-area-inset-bottom)); }
+.camera-close, .camera-spacer { width: 52px; height: 52px; }
+.camera-close { border: 0; border-radius: 50%; background: rgba(255,255,255,.2); color: #fff; font-size: 1.4rem; }
+.shutter { width: 78px; height: 78px; border-radius: 50%; border: 6px solid #fff; background: var(--red); box-shadow: 0 0 0 3px rgba(0,0,0,.4); }
+.shutter:active { transform: scale(.94); }
+
 @media (min-width: 700px) {
   .gallery { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   dialog.sheet { border-radius: 20px; margin: auto; }

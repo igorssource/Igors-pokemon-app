@@ -1,9 +1,9 @@
 // Bilderkennung: Foto laden, in einzelne Karten zerschneiden (Raster),
 // dann per Texterkennung (OCR, Tesseract) Kartennummer und Name lesen.
 
-const MAX_SIDE = 3000; // größere Fotos werden verkleinert (spart Zeit und Speicher)
+const MAX_SIDE = 2400; // größere Fotos werden verkleinert (Handys beenden sonst bei Speichermangel den Tab)
 
-/** Lädt eine Bilddatei in ein Canvas (Drehung aus der Kamera wird beachtet). */
+/** Lädt eine Bilddatei (oder einen Blob) in ein Canvas (Drehung aus der Kamera wird beachtet). */
 export async function loadImage(file) {
   const url = URL.createObjectURL(file);
   try {
@@ -11,39 +11,47 @@ export async function loadImage(file) {
     img.decoding = 'async';
     img.src = url;
     await img.decode();
-    const scale = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(img.naturalWidth * scale);
-    canvas.height = Math.round(img.naturalHeight * scale);
-    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-    return canvas;
+    return toCanvas(img, img.naturalWidth, img.naturalHeight);
   } finally {
     URL.revokeObjectURL(url);
   }
 }
 
+/** Zeichnet ein Bild oder Videobild verkleinert (max. MAX_SIDE) in ein neues Canvas. */
+export function toCanvas(drawable, width, height) {
+  const scale = Math.min(1, MAX_SIDE / Math.max(width, height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+  canvas.getContext('2d').drawImage(drawable, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
 /**
- * Schneidet den markierten Bereich in rows × cols einzelne Karten.
+ * Schneidet Karte Nr. `index` aus dem markierten Bereich (Raster rows × cols).
+ * Es wird immer nur eine Karte gleichzeitig im Speicher gehalten.
  * @param {HTMLCanvasElement} source
  * @param {{x:number,y:number,w:number,h:number}} rect  Bereich in Bildpixeln
  */
-export function splitGrid(source, rect, rows, cols) {
-  const cells = [];
+export function cropCell(source, rect, rows, cols, index) {
   const cw = rect.w / cols;
   const ch = rect.h / rows;
+  const r = Math.floor(index / cols), c = index % cols;
   const inset = 0.015; // kleiner Rand, damit keine Nachbarkarte hineinragt
   const grow = 0.08;   // großzügiger Ausschnitt für den zweiten Leseversuch (schiefe Fotos)
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const x0 = rect.x + c * cw, y0 = rect.y + r * ch;
-      const card = cropCanvas(source, x0 + cw * inset, y0 + ch * inset, cw * (1 - 2 * inset), ch * (1 - 2 * inset));
-      const gx = Math.max(0, x0 - cw * grow), gy = Math.max(0, y0 - ch * grow);
-      const gx2 = Math.min(source.width, x0 + cw * (1 + grow)), gy2 = Math.min(source.height, y0 + ch * (1 + grow));
-      card.wide = cropCanvas(source, gx, gy, gx2 - gx, gy2 - gy);
-      cells.push(card);
-    }
-  }
-  return cells;
+  const x0 = rect.x + c * cw, y0 = rect.y + r * ch;
+  const card = cropCanvas(source, x0 + cw * inset, y0 + ch * inset, cw * (1 - 2 * inset), ch * (1 - 2 * inset));
+  card.wide = () => {
+    const gx = Math.max(0, x0 - cw * grow), gy = Math.max(0, y0 - ch * grow);
+    const gx2 = Math.min(source.width, x0 + cw * (1 + grow)), gy2 = Math.min(source.height, y0 + ch * (1 + grow));
+    return cropCanvas(source, gx, gy, gx2 - gx, gy2 - gy);
+  };
+  return card;
+}
+
+/** Gibt den Speicher eines Canvas sofort frei (wichtig auf Handys). */
+export function freeCanvas(canvas) {
+  if (canvas) { canvas.width = 0; canvas.height = 0; }
 }
 
 function cropCanvas(source, x, y, w, h, scale = 1) {
@@ -114,8 +122,12 @@ export function getOcrWorker() {
 async function ocr(canvas, params) {
   const worker = await getOcrWorker();
   await worker.setParameters(params);
-  const { data } = await worker.recognize(canvas);
-  return data.text || '';
+  try {
+    const { data } = await worker.recognize(canvas);
+    return data.text || '';
+  } finally {
+    freeCanvas(canvas);
+  }
 }
 
 /**
@@ -129,13 +141,15 @@ export async function readCard(card) {
   };
   // Mehrere Versuche: normal, invertiert (helle Schrift auf dunklem Grund,
   // z. B. Full-Art-Karten) und mit größerem Ausschnitt (schief fotografiert)
+  let wide = null;
+  const getWide = () => (wide ||= card.wide());
   const attempts = [
     () => prepareForOcr(card, REGION_NUMBER),
     () => prepareForOcr(card, REGION_NUMBER, { invert: true }),
   ];
   if (card.wide) {
-    attempts.push(() => prepareForOcr(card.wide, REGION_NUMBER_WIDE));
-    attempts.push(() => prepareForOcr(card.wide, REGION_NUMBER_WIDE, { invert: true }));
+    attempts.push(() => prepareForOcr(getWide(), REGION_NUMBER_WIDE));
+    attempts.push(() => prepareForOcr(getWide(), REGION_NUMBER_WIDE, { invert: true }));
   }
   let rawNumber = '';
   let parsed = null;
@@ -145,6 +159,7 @@ export async function readCard(card) {
     parsed = parseNumberText(text);
     if (parsed) break;
   }
+  freeCanvas(wide);
   const rawName = await ocr(prepareForOcr(card, REGION_NAME), {
     tessedit_pageseg_mode: '6',
     tessedit_char_whitelist: '',
