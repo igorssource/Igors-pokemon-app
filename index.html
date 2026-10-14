@@ -62,10 +62,14 @@
           <button data-layout="3x3"><span class="lp-icon" style="--n:3"></span>9 Karten</button>
         </div>
         <p class="hint">Ziehe die gelben Ecken so, dass der Rahmen genau um die Karten liegt.</p>
-        <div class="crop-wrap" id="cropWrap">
-          <canvas id="cropCanvas"></canvas>
+        <div class="crop-area">
+          <div class="crop-wrap" id="cropWrap">
+            <canvas id="cropCanvas"></canvas>
+          </div>
+          <!-- Hier kann man mit dem Finger die Seite rauf und runter schieben -->
+          <div class="scroll-strip" aria-hidden="true"><span>▲</span><span>⋮</span><span>▼</span></div>
         </div>
-        <div class="row">
+        <div class="row sticky-actions">
           <button class="big-btn" id="scanRetake">↩︎ Neues Foto</button>
           <button class="big-btn primary" id="scanRecognize">🔍 Karten erkennen</button>
         </div>

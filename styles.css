@@ -146,8 +146,18 @@ main { padding: 12px 16px; max-width: 960px; margin: 0 auto; }
 }
 .lp-icon i { background: var(--yellow); border-radius: 2px; border: 1px solid #c99d00; }
 
-.crop-wrap { position: relative; width: 100%; touch-action: none; user-select: none; }
-.crop-wrap canvas { width: 100%; height: auto; display: block; border-radius: 10px; background: #222; }
+.crop-area { display: flex; gap: 8px; align-items: stretch; }
+.crop-wrap {
+  position: relative; flex: 1; min-width: 0; display: flex; justify-content: center; align-items: flex-start;
+  touch-action: none; user-select: none;
+}
+/* Foto nie höher als gut die Hälfte des Bildschirms, damit Platz zum Scrollen bleibt */
+.crop-wrap canvas { max-width: 100%; max-height: 58vh; width: auto; height: auto; display: block; border-radius: 10px; background: #222; }
+.scroll-strip {
+  flex: none; width: 40px; border-radius: 12px; background: #e6eaf2; color: var(--muted);
+  display: flex; flex-direction: column; justify-content: space-between; align-items: center;
+  padding: 10px 0; font-size: .8rem; touch-action: pan-y; user-select: none;
+}
 
 /* Fortschritt */
 .progress { height: 18px; border-radius: 999px; background: var(--border); overflow: hidden; }
