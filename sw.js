@@ -2,7 +2,7 @@
 // (inkl. Texterkennung) sowie bereits gesehene Kartenbilder im Cache.
 // Kartendaten und Preise werden NICHT zwischengespeichert, die kommen immer online.
 
-const VERSION = 'v2';
+const VERSION = 'v3';
 const APP_CACHE = `app-${VERSION}`;
 const IMG_CACHE = 'card-images';
 

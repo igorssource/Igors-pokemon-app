@@ -65,6 +65,26 @@ function renderProfiles() {
   }, p.name)));
 }
 
+// Eigene Rückfrage statt confirm(): große Knöpfe, auf Deutsch, kindgerecht.
+// buttons: [{ label, value, primary?, danger? }] -> Promise mit value (oder null bei Abbruch)
+function ask(title, text, buttons) {
+  const dialog = $('#askDialog');
+  return new Promise(resolve => {
+    const done = value => { dialog.close(); resolve(value); };
+    dialog.onclose = () => resolve(null);
+    $('#askDialogBody').replaceChildren(
+      el('h2', {}, title),
+      text ? el('p', {}, text) : null,
+      ...buttons.map(b => el('button', {
+        class: 'big-btn' + (b.danger ? ' danger' : b.primary ? ' primary' : ''),
+        onclick: () => done(b.value),
+      }, b.label)),
+      el('button', { class: 'big-btn', onclick: () => done(null) }, 'Abbrechen'),
+    );
+    dialog.showModal();
+  });
+}
+
 // ---------- Sammlung / Galerie ----------
 
 function renderCollection() {
@@ -92,13 +112,38 @@ function openCard(cardId) {
   const priceArea = el('div');
   const countText = el('span', {}, String(entry.count));
 
-  const changeCount = delta => {
-    if (delta < 0 && entry.count === 1 && !confirm(`${entry.name} aus der Sammlung entfernen?`)) return;
-    store.changeCount(entry.id, delta);
+  const afterChange = () => {
     renderCollection();
     const updated = store.findInCollection(entry.id);
-    if (!updated) { dialog.close(); toast('Karte entfernt'); return; }
+    if (!updated) { dialog.close(); return false; }
+    entry.count = updated.count;
     countText.textContent = String(updated.count);
+    return true;
+  };
+
+  const changeCount = async delta => {
+    if (delta < 0 && entry.count === 1) return removeCard();
+    store.changeCount(entry.id, delta);
+    afterChange();
+  };
+
+  // Karte entfernen (z. B. verkauft oder getauscht) – immer mit Rückfrage
+  const removeCard = async () => {
+    const owner = store.getActiveProfile().name;
+    const buttons = entry.count > 1
+      ? [
+        { label: '🗑️ Eine Karte entfernen', value: 1, danger: true },
+        { label: `🗑️ Alle ${entry.count} entfernen`, value: entry.count, danger: true },
+      ]
+      : [{ label: '🗑️ Ja, entfernen', value: 1, danger: true }];
+    const text = entry.count > 1
+      ? `${owner} hat diese Karte ${entry.count}-mal. Wie viele sollen raus?`
+      : `Die Karte wird aus der Sammlung von ${owner} gelöscht.`;
+    const n = await ask(`${entry.name} entfernen?`, text, buttons);
+    if (!n) return;
+    store.changeCount(entry.id, -n);
+    const left = afterChange();
+    toast(left ? `Eine Karte entfernt, ${entry.count} übrig` : `${entry.name} wurde entfernt`);
   };
 
   const priceBtn = el('button', {
@@ -131,6 +176,7 @@ function openCard(cardId) {
     priceBtn,
     priceArea,
     el('button', { class: 'big-btn primary', onclick: () => dialog.close() }, 'Schließen'),
+    el('button', { class: 'big-btn danger-outline', onclick: removeCard }, '🗑️ Aus der Sammlung entfernen'),
   );
   dialog.showModal();
 }

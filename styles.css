@@ -125,6 +125,8 @@ main { padding: 12px 16px; max-width: 960px; margin: 0 auto; }
 }
 .big-btn.primary { background: var(--red); border-color: var(--red); color: #fff; }
 .big-btn:disabled { opacity: .5; }
+.big-btn.danger { background: #c62828; border-color: #c62828; color: #fff; }
+.big-btn.danger-outline { border-color: #f1b8b4; color: #c62828; background: var(--surface); }
 .link-btn { border: 0; background: none; color: var(--blue); text-decoration: underline; padding: 10px 0; }
 .row { display: flex; gap: 10px; }
 .row > * { flex: 1; }
