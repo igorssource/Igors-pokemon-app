@@ -1,7 +1,7 @@
 // Bilderkennung: Foto laden, in einzelne Karten zerschneiden (Raster),
 // dann per Texterkennung (OCR, Tesseract) Kartennummer und Name lesen.
 
-const MAX_SIDE = 2400; // größere Fotos werden verkleinert (Handys beenden sonst bei Speichermangel den Tab)
+const MAX_SIDE = 3200; // größere Fotos werden verkleinert (Handys beenden sonst bei Speichermangel den Tab)
 
 /** Lädt eine Bilddatei (oder einen Blob) in ein Canvas (Drehung aus der Kamera wird beachtet). */
 export async function loadImage(file) {
@@ -65,10 +65,10 @@ function cropCanvas(source, x, y, w, h, scale = 1) {
 }
 
 /** Ausschnitt vergrößern, in Graustufen umwandeln und den Kontrast strecken. */
-function prepareForOcr(card, region, { invert = false } = {}) {
+function prepareForOcr(card, region, { invert = false, binarize = null, targetWidth = 2200 } = {}) {
   const x = card.width * region.x, y = card.height * region.y;
   const w = card.width * region.w, h = card.height * region.h;
-  const scale = Math.max(1, Math.min(4, 1400 / w));
+  const scale = Math.max(1, Math.min(5, targetWidth / w));
   const c = cropCanvas(card, x, y, w, h, scale);
   const ctx = c.getContext('2d');
   const img = ctx.getImageData(0, 0, c.width, c.height);
@@ -85,6 +85,12 @@ function prepareForOcr(card, region, { invert = false } = {}) {
   for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > total * 0.02) { lo = v; break; } }
   acc = 0;
   for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > total * 0.02) { hi = v; break; } }
+  if (binarize) {
+    localThreshold(d, c.width, c.height, binarize);
+    sharpen(d, c.width, c.height, Math.max(2, Math.round(scale * 1.4)), 1.6);
+    ctx.putImageData(img, 0, 0);
+    return c;
+  }
   const range = Math.max(1, hi - lo);
   for (let i = 0; i < d.length; i += 4) {
     let g = Math.min(255, Math.max(0, ((d[i] - lo) * 255) / range));
@@ -95,10 +101,76 @@ function prepareForOcr(card, region, { invert = false } = {}) {
   return c;
 }
 
+/**
+ * Schwarz-Weiß nach der Helligkeit der direkten Umgebung (nicht des ganzen Bildes).
+ * So bleibt kleine graue Schrift lesbar, auch wenn daneben ein dunkler Tisch,
+ * ein Schatten oder ein Glanzlicht ist. mode 'dark' = dunkle Schrift, 'light' = helle Schrift.
+ * Erwartet Graustufen in d[i] (R-Kanal).
+ */
+function localThreshold(d, width, height, mode) {
+  // Lokale Kontrast-Normalisierung: jeder Pixel wird mit Mittelwert und
+  // Streuung seiner Umgebung verglichen. Ergebnis bleibt ein weiches Graubild,
+  // das Tesseract selbst in Schwarz-Weiß umwandelt (das klappt bei unscharfer
+  // Schrift besser als ein hartes Schwarz-Weiß von uns).
+  const r = Math.max(12, Math.round(Math.min(width, height) / 18));
+  const W = width + 1;
+  const sum = new Float64Array(W * (height + 1));
+  const sq = new Float64Array(W * (height + 1));
+  for (let y = 0; y < height; y++) {
+    let rs = 0, rq = 0;
+    for (let x = 0; x < width; x++) {
+      const g = d[(y * width + x) * 4];
+      rs += g; rq += g * g;
+      sum[(y + 1) * W + x + 1] = sum[y * W + x + 1] + rs;
+      sq[(y + 1) * W + x + 1] = sq[y * W + x + 1] + rq;
+    }
+  }
+  const box = (a, x0, y0, x1, y1) => a[y1 * W + x1] - a[y0 * W + x1] - a[y1 * W + x0] + a[y0 * W + x0];
+  for (let y = 0; y < height; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(height, y + r + 1);
+    for (let x = 0; x < width; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(width, x + r + 1);
+      const n = (x1 - x0) * (y1 - y0);
+      const mean = box(sum, x0, y0, x1, y1) / n;
+      const std = Math.sqrt(Math.max(0, box(sq, x0, y0, x1, y1) / n - mean * mean));
+      const i = (y * width + x) * 4;
+      let v = (d[i] - mean) / (std + 12); // ~ -3..3
+      if (mode === 'light') v = -v;
+      const out = Math.max(0, Math.min(255, 170 + v * 70));
+      d[i] = d[i + 1] = d[i + 2] = out;
+    }
+  }
+}
+
+/** Unscharf maskieren: macht weiche (leicht unscharfe) Schrift kantiger. */
+function sharpen(d, width, height, r, amount) {
+  const src = new Float32Array(width * height);
+  for (let i = 0; i < src.length; i++) src[i] = d[i * 4];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let s = 0, n = 0;
+      for (let dy = -r; dy <= r; dy += r) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= height) continue;
+        for (let dx = -r; dx <= r; dx += r) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= width) continue;
+          s += src[yy * width + xx]; n++;
+        }
+      }
+      const v = src[y * width + x];
+      const out = Math.max(0, Math.min(255, v + amount * (v - s / n)));
+      const i = (y * width + x) * 4;
+      d[i] = d[i + 1] = d[i + 2] = out;
+    }
+  }
+}
+
 // Wo auf der Karte stehen Nummer und Name? (Anteile von Breite/Höhe)
 const REGION_NUMBER = { x: 0, y: 0.84, w: 1, h: 0.16 };
 const REGION_NAME = { x: 0.02, y: 0.02, w: 0.72, h: 0.12 };
 const REGION_NUMBER_WIDE = { x: 0, y: 0.68, w: 1, h: 0.32 };
+const REGION_ALL = { x: 0, y: 0, w: 1, h: 1 };
 
 let workerPromise = null;
 
@@ -124,6 +196,8 @@ async function ocr(canvas, params) {
   await worker.setParameters(params);
   try {
     const { data } = await worker.recognize(canvas);
+    // Fehlersuche: in der Konsole window.__ocrDebug = [] setzen, dann landen hier alle Ausschnitte
+    if (Array.isArray(window.__ocrDebug)) window.__ocrDebug.push({ img: canvas.toDataURL('image/png'), text: data.text });
     return data.text || '';
   } finally {
     freeCanvas(canvas);
@@ -147,9 +221,12 @@ export async function readCard(card) {
     () => prepareForOcr(card, REGION_NUMBER),
     () => prepareForOcr(card, REGION_NUMBER, { invert: true }),
   ];
+  attempts.push(() => prepareForOcr(card, REGION_NUMBER, { binarize: 'dark' }));
   if (card.wide) {
-    attempts.push(() => prepareForOcr(getWide(), REGION_NUMBER_WIDE));
-    attempts.push(() => prepareForOcr(getWide(), REGION_NUMBER_WIDE, { invert: true }));
+    attempts.push(() => prepareForOcr(getWide(), REGION_NUMBER_WIDE, { binarize: 'dark' }));
+    attempts.push(() => prepareForOcr(getWide(), REGION_NUMBER_WIDE, { binarize: 'light' }));
+    // Letzter Versuch: ganze Fläche absuchen (Karte liegt z. B. klein in der Mitte des Fotos)
+    attempts.push(() => prepareForOcr(getWide(), REGION_ALL, { binarize: 'dark', targetWidth: 2600 }));
   }
   let rawNumber = '';
   let parsed = null;
@@ -192,6 +269,14 @@ export function parseNumberText(raw) {
     while ((m = re.exec(line))) {
       const result = interpretPair(m[1], m[2]);
       if (result) return setCode ? { ...result, setCode } : result;
+    }
+
+    // Schrägstrich nicht erkannt ("MEWDE004165" oder "MEW DE 004 1 165"):
+    // nur wenn Set-Kürzel + Sprache davor stehen, sonst wäre es zu unsicher
+    const glued = line.match(new RegExp(`([A-Z]{3})\\s*(?:${LANG_CODES})\\s*(${DIGITISH}{3})\\s*[1IL]?\\s*(${DIGITISH}{3})(?![0-9])`));
+    if (glued) {
+      const result = interpretPair(glued[2], glued[3]);
+      if (result) return { ...result, setCode: glued[1] };
     }
 
     const promo = line.match(new RegExp(`\\b(SWSH|SM|XY|BW)\\s?(${DIGITISH}{2,3})\\b`));

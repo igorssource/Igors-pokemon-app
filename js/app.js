@@ -283,9 +283,9 @@ async function restoreScan() {
   }
 }
 
-// ---------- Kamera direkt in der App ----------
-// Die Kamera läuft im Browser selbst. So muss Android nicht in die Kamera-App
-// wechseln, wobei es den Browser-Tab sonst manchmal beendet.
+// ---------- Kamera direkt in der App (Ausweich-Lösung) ----------
+// Standard ist die normale Kamera-App des Handys (beste Qualität, Fokus).
+// Lädt Android dabei die Seite neu, kann man hierauf ausweichen.
 
 let cameraStream = null;
 
@@ -294,12 +294,17 @@ async function openCamera() {
   try {
     cameraStream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 2560 }, height: { ideal: 1920 } },
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 4096 }, height: { ideal: 3072 } },
     });
   } catch {
-    toast('Die Kamera ist nicht freigegeben. Ich öffne die normale Kamera-App.');
-    $('#cameraInput').click();
+    toast('Die Kamera ist nicht freigegeben. Bitte die normale Kamera benutzen.');
     return;
+  }
+  const track = cameraStream.getVideoTracks()[0];
+  // Autofokus einschalten, wenn das Handy es erlaubt
+  const caps = track.getCapabilities?.() || {};
+  if (caps.focusMode?.includes('continuous')) {
+    track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
   }
   const video = $('#cameraVideo');
   video.srcObject = cameraStream;
@@ -314,10 +319,19 @@ function closeCamera() {
   $('#cameraOverlay').hidden = true;
 }
 
-function takePicture() {
+async function takePicture() {
   const video = $('#cameraVideo');
   if (!video.videoWidth) return;
-  const canvas = toCanvas(video, video.videoWidth, video.videoHeight);
+  let canvas = null;
+  // Richtiges Foto in voller Auflösung (mit Fokus), nicht nur ein Videobild
+  const track = cameraStream?.getVideoTracks()[0];
+  if (track && 'ImageCapture' in window) {
+    try {
+      const blob = await new ImageCapture(track).takePhoto();
+      canvas = await loadImage(blob);
+    } catch { /* dann eben das Videobild */ }
+  }
+  canvas ||= toCanvas(video, video.videoWidth, video.videoHeight);
   closeCamera();
   startWithPhoto(canvas);
 }

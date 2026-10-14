@@ -44,13 +44,16 @@
     <section class="view" id="view-scan" hidden>
       <div class="step" id="scanStepPick">
         <h2>Karten fotografieren</h2>
-        <p class="hint">Lege die Karten gut beleuchtet auf den Tisch oder fotografiere eine ganze Album-Seite. Die Kartennummer unten auf der Karte sollte gut lesbar sein.</p>
-        <button class="big-btn primary" id="cameraBtn">📷 Foto aufnehmen</button>
-        <input type="file" accept="image/*" capture="environment" id="cameraInput" hidden>
+        <p class="hint">Lege die Karten gut beleuchtet auf den Tisch oder fotografiere eine ganze Album-Seite. Geh so nah ran, dass die Karten das Foto füllen und die Kartennummer unten scharf ist.</p>
+        <label class="big-btn primary">
+          📷 Foto aufnehmen
+          <input type="file" accept="image/*" capture="environment" id="cameraInput" hidden>
+        </label>
         <label class="big-btn">
           🖼️ Foto aus der Galerie wählen
           <input type="file" accept="image/*" id="fileInput" hidden>
         </label>
+        <button class="link-btn" id="cameraBtn">Kamera direkt in der App benutzen (falls die normale Kamera die Seite neu lädt)</button>
         <button class="link-btn" id="manualFromScan">Karte lieber von Hand eingeben</button>
       </div>
 
