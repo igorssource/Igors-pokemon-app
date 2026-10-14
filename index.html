@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#e3350d">
+  <meta name="description" content="Pokémon-Kartensammlung für Max und Tim: Karten per Foto erfassen, Sammlung ansehen, Preise abrufen.">
+  <title>Kartensammlung</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="ball" aria-hidden="true"></span>
+      <span>Kartensammlung</span>
+    </div>
+    <nav class="profiles" id="profileTabs" aria-label="Sammlung wählen"></nav>
+    <button class="icon-btn" id="settingsBtn" aria-label="Einstellungen">⚙️</button>
+  </header>
+
+  <div class="offline-banner" id="offlineBanner" hidden>
+    📡 Keine Internetverbindung. Kartendaten und Preise können gerade nicht geladen werden.
+  </div>
+
+  <main>
+    <!-- Sammlung (Galerie) -->
+    <section class="view" id="view-collection">
+      <div class="toolbar">
+        <input type="search" id="collectionFilter" placeholder="In der Sammlung suchen …" aria-label="In der Sammlung suchen">
+        <span class="count" id="collectionCount"></span>
+      </div>
+      <div class="gallery" id="gallery"></div>
+      <div class="empty" id="galleryEmpty" hidden>
+        <div class="empty-emoji">📸</div>
+        <p>Noch keine Karten in dieser Sammlung.</p>
+        <p>Tippe unten auf <strong>Karten scannen</strong>, um loszulegen!</p>
+      </div>
+    </section>
+
+    <!-- Erfassen -->
+    <section class="view" id="view-scan" hidden>
+      <div class="step" id="scanStepPick">
+        <h2>Karten fotografieren</h2>
+        <p class="hint">Lege die Karten gut beleuchtet auf den Tisch oder fotografiere eine ganze Album-Seite. Die Kartennummer unten auf der Karte sollte gut lesbar sein.</p>
+        <label class="big-btn primary">
+          📷 Foto aufnehmen
+          <input type="file" accept="image/*" capture="environment" id="cameraInput" hidden>
+        </label>
+        <label class="big-btn">
+          🖼️ Foto aus der Galerie wählen
+          <input type="file" accept="image/*" id="fileInput" hidden>
+        </label>
+        <button class="link-btn" id="manualFromScan">Karte lieber von Hand eingeben</button>
+      </div>
+
+      <div class="step" id="scanStepGrid" hidden>
+        <h2>Wie viele Karten sind auf dem Foto?</h2>
+        <div class="layout-picker" id="layoutPicker">
+          <button data-layout="1x1"><span class="lp-icon" style="--n:1"></span>1 Karte</button>
+          <button data-layout="2x2"><span class="lp-icon" style="--n:2"></span>4 Karten</button>
+          <button data-layout="3x3"><span class="lp-icon" style="--n:3"></span>9 Karten</button>
+        </div>
+        <p class="hint">Ziehe die gelben Ecken so, dass der Rahmen genau um die Karten liegt.</p>
+        <div class="crop-wrap" id="cropWrap">
+          <canvas id="cropCanvas"></canvas>
+        </div>
+        <div class="row">
+          <button class="big-btn" id="scanRetake">↩︎ Neues Foto</button>
+          <button class="big-btn primary" id="scanRecognize">🔍 Karten erkennen</button>
+        </div>
+      </div>
+
+      <div class="step" id="scanStepProgress" hidden>
+        <h2>Ich schaue mir die Karten an …</h2>
+        <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+        <p class="hint" id="progressText"></p>
+      </div>
+
+      <div class="step" id="scanStepResults" hidden>
+        <h2>Gefundene Karten</h2>
+        <p class="hint">Prüfe kurz, ob alles stimmt. Tippe auf das richtige Bild, wenn mehrere Karten in Frage kommen.</p>
+        <div id="scanResults" class="results"></div>
+        <div class="row sticky-actions">
+          <button class="big-btn" id="scanCancel">Abbrechen</button>
+          <button class="big-btn primary" id="scanSave">Speichern</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Manuelle Eingabe -->
+    <section class="view" id="view-manual" hidden>
+      <h2>Karte von Hand suchen</h2>
+      <p class="hint">Die Nummer steht unten links oder rechts auf der Karte, z. B. <strong>025/165</strong>. Das Set-Kürzel (z. B. <strong>MEW</strong>) steht oft direkt daneben.</p>
+      <form id="manualForm" class="form">
+        <label>Kartennummer
+          <input name="number" inputmode="text" autocomplete="off" placeholder="z. B. 025/165">
+        </label>
+        <label>Set-Kürzel (optional)
+          <input name="setCode" autocomplete="off" placeholder="z. B. MEW" maxlength="5">
+        </label>
+        <label>Name (optional, auf Englisch klappt es am besten)
+          <input name="name" autocomplete="off" placeholder="z. B. Pikachu">
+        </label>
+        <button class="big-btn primary" type="submit">🔍 Suchen</button>
+      </form>
+      <div id="manualResults" class="candidates big"></div>
+    </section>
+  </main>
+
+  <nav class="bottombar" aria-label="Hauptmenü">
+    <button data-view="collection" class="active">🗂️<span>Sammlung</span></button>
+    <button data-view="scan" class="scan-btn">📷<span>Karten scannen</span></button>
+    <button data-view="manual">⌨️<span>Von Hand</span></button>
+  </nav>
+
+  <!-- Kartendetails -->
+  <dialog id="cardDialog" class="sheet">
+    <div class="sheet-body" id="cardDialogBody"></div>
+  </dialog>
+
+  <!-- Einstellungen -->
+  <dialog id="settingsDialog" class="sheet">
+    <div class="sheet-body">
+      <h2>Einstellungen</h2>
+      <label class="form">Pokémon TCG API-Schlüssel (optional)
+        <input id="apiKeyInput" autocomplete="off" placeholder="Ohne Schlüssel gilt ein kleineres Tageslimit">
+      </label>
+      <p class="hint">Einen kostenlosen Schlüssel gibt es auf dev.pokemontcg.io.</p>
+      <h3>Sicherung</h3>
+      <p class="hint">Die Sammlungen liegen nur auf diesem Gerät. Eine Sicherung schützt vor Verlust, z. B. beim Handywechsel.</p>
+      <div class="row">
+        <button class="big-btn" id="exportBtn">⬇️ Sicherung speichern</button>
+        <label class="big-btn">⬆️ Sicherung laden
+          <input type="file" accept="application/json,.json" id="importInput" hidden>
+        </label>
+      </div>
+      <div class="row">
+        <button class="big-btn primary" id="settingsClose">Fertig</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="vendor/tesseract/tesseract.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
