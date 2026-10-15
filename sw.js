@@ -2,13 +2,13 @@
 // (inkl. Texterkennung) sowie bereits gesehene Kartenbilder im Cache.
 // Kartendaten und Preise werden NICHT zwischengespeichert, die kommen immer online.
 
-const VERSION = 'v7';
+const VERSION = 'v8';
 const APP_CACHE = `app-${VERSION}`;
 const IMG_CACHE = 'card-images';
 
 const APP_FILES = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
-  'js/app.js', 'js/api.js', 'js/scanner.js', 'js/store.js', 'js/scan-state.js', 'js/detect.js', 'js/cards-db.js', 'data/cards.json',
+  'js/app.js', 'js/api.js', 'js/scanner.js', 'js/store.js', 'js/scan-state.js', 'js/detect.js', 'js/cards-db.js', 'js/ai.js', 'data/cards.json',
   'icons/icon-192.png', 'icons/icon-512.png',
   'vendor/tesseract/tesseract.min.js',
 ];

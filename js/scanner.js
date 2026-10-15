@@ -1,7 +1,9 @@
+import { loadCv } from './detect.js';
+
 // Bilderkennung: Foto laden, in einzelne Karten zerschneiden (Raster),
 // dann per Texterkennung (OCR, Tesseract) Kartennummer und Name lesen.
 
-const MAX_SIDE = 3200; // größere Fotos werden verkleinert (Handys beenden sonst bei Speichermangel den Tab)
+const MAX_SIDE = 4096; // größere Fotos werden verkleinert (Handys beenden sonst bei Speichermangel den Tab)
 
 /** Lädt eine Bilddatei (oder einen Blob) in ein Canvas (Drehung aus der Kamera wird beachtet). */
 export async function loadImage(file) {
@@ -230,6 +232,55 @@ async function ocr(worker, canvas, params) {
   }
 }
 
+// ---------- PaddleOCR (liest die kleine Kartennummer viel besser als Tesseract) ----------
+// Wird beim ersten Scan geladen (ca. 30 MB, danach aus dem Cache). Klappt das nicht
+// (z. B. sehr altes Handy), liest die App wie bisher nur mit Tesseract.
+
+let paddlePromise = null;
+let paddleQueue = Promise.resolve();
+
+export function getPaddle() {
+  if (!paddlePromise) {
+    paddlePromise = (async () => {
+      await loadCv(); // PaddleOCR braucht OpenCV (ist schon für die Kartensuche da)
+      const { createPaddle } = await import('../vendor/paddle/paddle.js');
+      return await createPaddle(absolute('vendor/paddle/'));
+    })().catch(err => {
+      console.warn('PaddleOCR nicht verfügbar', err);
+      return null;
+    });
+  }
+  return paddlePromise;
+}
+
+// Text im Ausschnitt lesen; Aufrufe nacheinander (ein Modell für alle Karten)
+async function paddleRead(canvas) {
+  const paddle = await getPaddle();
+  if (!paddle) { freeCanvas(canvas); return null; }
+  const run = paddleQueue.then(async () => {
+    try {
+      const url = canvas.toDataURL('image/jpeg', 0.95);
+      const res = await paddle.detect(url);
+      return (res?.texts || res || []).map(l => l.text).join('\n');
+    } finally {
+      freeCanvas(canvas);
+    }
+  });
+  paddleQueue = run.catch(() => {});
+  return run.catch(() => null);
+}
+
+// Unterer Kartenrand mit Nummer, auf ca. 900 px Breite gebracht
+function numberStrip(card) {
+  const src = card.wide ? card.wide() : card;
+  // beim großzügigen Ausschnitt (Raster) etwas mehr Höhe, weil der Rahmen ungenau sein kann
+  const region = card.wide ? { x: 0, y: 0.66, w: 1, h: 0.34 } : { x: 0, y: 0.76, w: 1, h: 0.24 };
+  const x = src.width * region.x, y = src.height * region.y, w = src.width * region.w, h = src.height * region.h;
+  const out = cropCanvas(src, x, y, w, h, Math.min(2, 900 / w));
+  if (src !== card) freeCanvas(src);
+  return out;
+}
+
 /**
  * Liest Nummer (+ Set-Kürzel) und Name von einer einzelnen Karte.
  * @param {(n:{number:string,total?:string,setCode?:string}) => boolean|Promise<boolean>} [validate]
@@ -254,20 +305,34 @@ export async function readCard(card, validate = null) {
   attempts.push(() => prepareForOcr(big(), REGION_NUMBER_WIDE, { binarize: 'dark' }));
   attempts.push(() => prepareForOcr(big(), REGION_NUMBER_WIDE, { binarize: 'light' }));
 
+  let rawNumber = '';
+  let parsed = null;
+  let valid = false;
+  const check = async text => {
+    for (const cand of parseNumberCandidates(text)) {
+      if (!validate) { parsed = cand; return true; }
+      if (await validate(cand)) { parsed = cand; valid = true; return true; }
+      parsed ||= cand; // unsicher, aber besser als nichts
+    }
+    return false;
+  };
+
+  // 1. PaddleOCR
+  const paddleText = await paddleRead(numberStrip(card));
+  if (paddleText != null) {
+    rawNumber = paddleText;
+    if (await check(paddleText)) {
+      return { ...parsed, name: '', rawNumber, rawName: '', valid };
+    }
+  }
+
+  // 2. Tesseract (mehrere Aufbereitungen)
   const worker = await acquire();
   try {
-    let rawNumber = '';
-    let parsed = null;
-    let valid = false;
     for (const attempt of attempts) {
       const text = await ocr(worker, attempt(), numberParams);
       rawNumber += (rawNumber ? '\n---\n' : '') + text;
-      for (const cand of parseNumberCandidates(text)) {
-        if (!validate) { parsed = cand; break; }
-        if (await validate(cand)) { parsed = cand; valid = true; break; }
-        parsed ||= cand; // unsicher, aber besser als nichts
-      }
-      if (parsed && (!validate || valid)) break;
+      if (await check(text)) break;
     }
     freeCanvas(wide);
     // Name nur lesen, wenn die Nummer nicht eindeutig ist (spart Zeit)
@@ -329,6 +394,11 @@ export function parseNumberCandidates(raw) {
 
     const promo = line.match(new RegExp(`\\b(SWSH|SM|XY|BW)\\s?(${DIGITISH}{2,3})\\b`));
     if (promo) add({ number: promo[1] + fixDigits(promo[2]) });
+  }
+  // Zuletzt: Schrägstrich ganz verschluckt ("211189" statt "211/189"). Nur als Notlösung,
+  // die Kartenliste prüft dann, ob es die Nummer wirklich gibt.
+  for (const m of text.matchAll(/(?<![0-9])([0-9]{1,3})([0-9]{3})(?![0-9])/g)) {
+    if (m[1].length + m[2].length >= 5) add(interpretPair(m[1], m[2]));
   }
   return found;
 }

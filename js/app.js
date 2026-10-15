@@ -1,7 +1,8 @@
 import * as store from './store.js';
 import { findCards, fetchPrice, normalizeNumber, OfflineError } from './api.js';
-import { loadImage, toCanvas, cropCell, freeCanvas, readCard, getOcrWorker, parseNumberText, OCR_PARALLEL } from './scanner.js';
+import { loadImage, toCanvas, cropCell, freeCanvas, readCard, getOcrWorker, getPaddle, parseNumberText, OCR_PARALLEL } from './scanner.js';
 import { loadCardsDb, existsLocal } from './cards-db.js';
+import { aiEnabled, aiReadCard, AiKeyError } from './ai.js';
 import * as scanState from './scan-state.js';
 import { detectCards, warpCard, fitGrid } from './detect.js';
 
@@ -267,6 +268,7 @@ function addPhotos(blobs) {
   showPhoto(first);
   if (blobs.length > 1) toast(`${blobs.length} Fotos hinzugefügt`);
   getOcrWorker().catch(() => {}); // Texterkennung schon mal im Hintergrund laden
+  getPaddle();
   loadCardsDb();
 }
 
@@ -661,6 +663,20 @@ async function recognize() {
   const db = await loadCardsDb();
   const validate = db ? n => existsLocal(db, n) : null;
 
+  // Optional: KI (nur mit eigenem Schlüssel). Klappt sie nicht, liest die App selbst.
+  let useAi = aiEnabled();
+  const readWithAi = async cell => {
+    if (!useAi) return null;
+    try {
+      const r = await aiReadCard(cell);
+      if (!r) return null;
+      return { ...r, rawNumber: `KI: ${r.number || '?'}/${r.total || '?'} ${r.setCode || ''} ${r.name || ''}`, valid: !!(db && r.number && existsLocal(db, r)) };
+    } catch (err) {
+      if (err instanceof AiKeyError) { useAi = false; toast(`${err.message} Die App liest jetzt ohne KI weiter.`, 5000); }
+      return null;
+    }
+  };
+
   showToken++; // laufendes Laden der Vorschau abbrechen
   freeCanvas(scan.source);
   scan.source = null;
@@ -701,7 +717,12 @@ async function recognize() {
         // höchstens so viele Karten gleichzeitig im Speicher, wie parallel gelesen werden
         cell = mode === 'auto' ? await warpCard(source, photo.quads[j]) : cropCell(source, photo.rect, rows, cols, j);
         item.thumb = thumb(cell);
-        item.read = await readCard(cell, validate);
+        item.read = await readWithAi(cell);
+        if (!item.read?.valid) {
+          const local = await readCard(cell, validate);
+          // KI-Ergebnis behalten, wenn die eigene Erkennung nichts Besseres findet (z. B. Name)
+          item.read = local.valid || !item.read ? local : { ...local, ...item.read, rawNumber: local.rawNumber };
+        }
       } catch {
         item.error = 'Die Karte konnte nicht gelesen werden.';
       }
@@ -720,7 +741,8 @@ async function recognize() {
       bar.style.width = `${Math.round(((p + done / cells) / total) * 100)}%`;
     };
     let next = 0;
-    await Promise.all(Array.from({ length: Math.min(OCR_PARALLEL, cells) }, async () => {
+    const parallel = useAi ? 4 : OCR_PARALLEL; // KI-Anfragen warten nur aufs Netz
+    await Promise.all(Array.from({ length: Math.min(parallel, cells) }, async () => {
       while (next < cells) await readOne(next++);
     }));
     scan.items.push(...results);
@@ -741,7 +763,11 @@ function preselect(item) {
   const raw = String(item.read.rawNumber || '').toUpperCase();
   let byCode = code ? c.filter(x => x.set?.ptcgoCode === code) : [];
   if (byCode.length !== 1 && c.length > 1) {
-    byCode = c.filter(x => x.set?.ptcgoCode && new RegExp(`(^|[^A-Z])${x.set.ptcgoCode}`).test(raw));
+    byCode = c.filter(x => x.set?.ptcgoCode && new RegExp(`(^|[^A-Z])${x.set.ptcgoCode}([^A-Z]|$)|${x.set.ptcgoCode}(DE|EN|IT|FR|ES|PT|NL)`).test(raw));
+  }
+  if (byCode.length !== 1 && c.length > 1 && code.length === 3) {
+    // Kürzel leicht verlesen (JIG statt JTG): 2 von 3 Buchstaben reichen, wenn es eindeutig ist
+    byCode = c.filter(x => [...(x.set?.ptcgoCode || '')].filter((ch, i) => ch === code[i]).length >= 2);
   }
   if (c.length === 1 && item.read.number) {
     item.chosenId = c[0].id;
@@ -978,11 +1004,13 @@ async function onManualSubmit(e) {
 
 function openSettings() {
   $('#apiKeyInput').value = store.getSetting('apiKey') || '';
+  $('#aiKeyInput').value = store.getSetting('aiKey') || '';
   $('#settingsDialog').showModal();
 }
 
 function closeSettings() {
   store.setSetting('apiKey', $('#apiKeyInput').value.trim());
+  store.setSetting('aiKey', $('#aiKeyInput').value.trim());
   $('#settingsDialog').close();
 }
 

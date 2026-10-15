@@ -12,8 +12,11 @@ Die App läuft im Chrome-Browser und lässt sich wie eine normale App auf den St
   *1 Karte*, *4 Karten* (2×2) oder *9 Karten* (3×3 Album-Seite).
   Die App **findet die Karten automatisch** (grün umrandet, auch leicht schräg fotografiert) und schneidet
   jede gerade aus. Nur wenn das nicht passt, legt man den gelben Rahmen mit den Ecken selbst um die Karten.
-  Per Texterkennung werden die **Kartennummer** (z. B. `025/165`), das **Set-Kürzel** (z. B. `MEW`)
-  und der Name gelesen. Alles läuft auf dem Handy, ohne Cloud-Dienst und kostenlos.
+  Per Texterkennung (PaddleOCR, Tesseract als Ersatz) werden die **Kartennummer** (z. B. `025/165`) und
+  das **Set-Kürzel** (z. B. `MEW`) gelesen. Alles läuft auf dem Handy, ohne Cloud-Dienst und kostenlos.
+- **KI-Erkennung (optional):** Mit einem eigenen Anthropic-API-Schlüssel (⚙️) liest Claude jede Karte –
+  auch mit Spiegelung oder auf Chinesisch. Das Kartenbild geht dann an Anthropic, Kosten ca. 0,01 Cent pro Karte.
+  Ohne Schlüssel bleibt alles wie oben.
 - **Statistik:** Nach dem Erkennen zeigt die App, wie viele Fotos es waren, wie viele Karten erwartet
   wurden (Fotos × Raster), wie viele erkannt wurden und was fehlt – auch pro Foto.
 - **Suche über die Nummer – direkt auf dem Handy:** Die Nummer ist in jeder Sprache gleich. Die App hat
@@ -78,6 +81,8 @@ Zum Ausprobieren am Computer: im Ordner `npx serve .` (oder `python3 -m http.ser
 | `js/store.js` | Sammlungen pro Kind, Sicherung |
 | `sw.js`, `manifest.webmanifest`, `icons/` | Installierbarkeit (PWA) |
 | `vendor/tesseract/` | Texterkennung Tesseract.js 5.1.1 (Apache-2.0), lokal eingebunden |
+| `js/ai.js`, `vendor/anthropic/` | optionale KI-Erkennung (Claude, Anthropic SDK 0.134, MIT) |
+| `vendor/paddle/` | Texterkennung PaddleOCR PP-OCRv4 + ONNX Runtime (Apache-2.0 / MIT), siehe `vendor/paddle/README.md` |
 | `vendor/opencv/` | Bildverarbeitung OpenCV.js 4.10 (@techstark/opencv-js, Apache-2.0), wird erst beim Scannen geladen |
 
 ## Nächste Schritte (spätere Phasen)
