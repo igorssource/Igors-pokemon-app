@@ -663,7 +663,7 @@ async function recognize() {
   const db = await loadCardsDb();
   const validate = db ? n => existsLocal(db, n) : null;
 
-  // Optional: KI (nur mit eigenem Schlüssel). Klappt sie nicht, liest die App selbst.
+  // Optional: KI (nur mit eigenem Schlüssel), nur für Karten, die die App selbst nicht eindeutig erkennt
   let useAi = aiEnabled();
   const readWithAi = async cell => {
     if (!useAi) return null;
@@ -712,36 +712,49 @@ async function recognize() {
     text.textContent = `${prefix}lese ${cells} ${cells === 1 ? 'Karte' : 'Karten'} …`;
     const readOne = async j => {
       const item = { photo: p, slot: j, thumb: '', read: {}, candidates: [], chosenId: null, include: false, error: '' };
+      const search = async () => {
+        if (item.read.number || item.read.name) {
+          try {
+            item.candidates = await findCards(item.read);
+            item.error = '';
+          } catch (err) {
+            item.error = errorText(err);
+          }
+        }
+        preselect(item);
+      };
       let cell = null;
       try {
         // höchstens so viele Karten gleichzeitig im Speicher, wie parallel gelesen werden
         cell = mode === 'auto' ? await warpCard(source, photo.quads[j]) : cropCell(source, photo.rect, rows, cols, j);
         item.thumb = thumb(cell);
-        item.read = await readWithAi(cell);
-        if (!item.read?.valid) {
-          const local = await readCard(cell, validate);
-          // KI-Ergebnis behalten, wenn die eigene Erkennung nichts Besseres findet (z. B. Name)
-          item.read = local.valid || !item.read ? local : { ...local, ...item.read, rawNumber: local.rawNumber };
+        // 1. Erst selbst lesen (kostenlos, auf dem Handy)
+        item.read = await readCard(cell, validate);
+        await search();
+        // 2. Nur wenn das nicht eindeutig klappt: KI fragen (falls eingeschaltet)
+        if (!item.chosenId && useAi) {
+          const ai = await readWithAi(cell);
+          if (ai && (ai.valid || !item.read.valid)) {
+            item.read = { ...item.read, ...ai, rawNumber: `${ai.rawNumber}\n---\n${item.read.rawNumber || ''}` };
+            await search();
+          } else if (ai?.name) {
+            // Nummer stimmt schon, KI kennt aber den Namen: hilft bei zwei Karten mit gleicher Nummer
+            item.read = { ...item.read, name: ai.name };
+            await search();
+          }
         }
       } catch {
-        item.error = 'Die Karte konnte nicht gelesen werden.';
+        item.error ||= 'Die Karte konnte nicht gelesen werden.';
+        if (!item.candidates.length) preselect(item);
       }
       freeCanvas(cell);
-      if (!item.error && (item.read.number || item.read.name)) {
-        try {
-          item.candidates = await findCards(item.read);
-        } catch (err) {
-          item.error = errorText(err);
-        }
-      }
-      preselect(item);
       results[j] = item;
       done++;
       text.textContent = `${prefix}${done} von ${cells} ${cells === 1 ? 'Karte' : 'Karten'} gelesen …`;
       bar.style.width = `${Math.round(((p + done / cells) / total) * 100)}%`;
     };
     let next = 0;
-    const parallel = useAi ? 4 : OCR_PARALLEL; // KI-Anfragen warten nur aufs Netz
+    const parallel = OCR_PARALLEL;
     await Promise.all(Array.from({ length: Math.min(parallel, cells) }, async () => {
       while (next < cells) await readOne(next++);
     }));

@@ -14,8 +14,8 @@ Die App läuft im Chrome-Browser und lässt sich wie eine normale App auf den St
   jede gerade aus. Nur wenn das nicht passt, legt man den gelben Rahmen mit den Ecken selbst um die Karten.
   Per Texterkennung (PaddleOCR, Tesseract als Ersatz) werden die **Kartennummer** (z. B. `025/165`) und
   das **Set-Kürzel** (z. B. `MEW`) gelesen. Alles läuft auf dem Handy, ohne Cloud-Dienst und kostenlos.
-- **KI-Erkennung (optional):** Mit einem eigenen Anthropic-API-Schlüssel (⚙️) liest Claude jede Karte –
-  auch mit Spiegelung oder auf Chinesisch. Das Kartenbild geht dann an Anthropic, Kosten ca. 0,01 Cent pro Karte.
+- **KI-Erkennung (optional):** Mit einem eigenen Anthropic-API-Schlüssel (⚙️) liest Claude die Karten, die die App
+  selbst nicht eindeutig erkennt – auch mit Spiegelung oder auf Chinesisch. Nur diese Kartenbilder gehen an Anthropic, Kosten ca. 0,01 Cent pro Karte.
   Ohne Schlüssel bleibt alles wie oben.
 - **Statistik:** Nach dem Erkennen zeigt die App, wie viele Fotos es waren, wie viele Karten erwartet
   wurden (Fotos × Raster), wie viele erkannt wurden und was fehlt – auch pro Foto.
