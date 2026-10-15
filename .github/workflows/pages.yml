@@ -1,9 +1,13 @@
 # Veröffentlicht die App bei jedem Push auf main über GitHub Pages.
+# Einmal pro Woche (montags) wird dabei auch die Kartenliste data/cards.json neu gebaut,
+# damit neue Sets automatisch dazukommen.
 name: GitHub Pages
 
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: '17 4 * * 1'
   workflow_dispatch:
 
 permissions:
@@ -23,6 +27,12 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Kartenliste aktualisieren
+        # klappt das mal nicht, bleibt die Liste aus dem Repository
+        run: node scripts/build-cards.mjs || git checkout -- data/cards.json
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

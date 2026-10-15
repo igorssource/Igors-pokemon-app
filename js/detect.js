@@ -86,8 +86,12 @@ export async function detectCards(source) {
     // Verschachtelte Treffer (Bildrahmen innerhalb der Karte, Hülle um die Karte):
     // nur das größte Viereck behalten, das die anderen enthält
     found.sort((a, b) => b.area - a.area);
+    // Eine ganze Album-Seite mit 2×2 Karten hat fast dasselbe Seitenverhältnis wie eine Karte:
+    // Vierecke, in denen mehrere kleinere Karten liegen, sind Seiten, keine Karten
+    const isPage = f => found.filter(o => o.area < f.area * 0.6 && contains(f.rr, o.rr.center)).length >= 2;
+    const singles = found.filter(f => !isPage(f));
     const cards = [];
-    for (const f of found) {
+    for (const f of singles) {
       const inside = cards.some(k => contains(k.rr, f.rr.center));
       if (!inside) cards.push(f);
     }
@@ -169,4 +173,132 @@ export async function warpCard(source, quad) {
   } finally {
     for (const m of mats) m.delete();
   }
+}
+
+/**
+ * Zweiter Weg für Album-Seiten (Karten in Hüllen, deren Ränder kaum zu sehen sind):
+ * sucht lange gerade Kanten und legt das Raster rows × cols so, dass möglichst viele
+ * Kartenränder darauf liegen. Ergebnis: Rahmen in Bildpixeln oder null, wenn unsicher.
+ */
+export function fitGrid(source, rows, cols) {
+  const scale = Math.min(1, 1000 / Math.max(source.width, source.height));
+  const W = Math.round(source.width * scale), H = Math.round(source.height * scale);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0, W, H);
+  const rgba = ctx.getImageData(0, 0, W, H).data;
+  c.width = 0;
+  const g = new Float32Array(W * H);
+  for (let i = 0; i < g.length; i++) g[i] = 0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2];
+
+  // Sobel: senkrechte und waagerechte Kanten
+  const ax = new Float32Array(W * H), ay = new Float32Array(W * H), mag = [];
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      const gx = (g[i - W + 1] + 2 * g[i + 1] + g[i + W + 1]) - (g[i - W - 1] + 2 * g[i - 1] + g[i + W - 1]);
+      const gy = (g[i + W - 1] + 2 * g[i + W] + g[i + W + 1]) - (g[i - W - 1] + 2 * g[i - W] + g[i - W + 1]);
+      ax[i] = Math.abs(gx); ay[i] = Math.abs(gy);
+      if ((x + y) % 7 === 0) mag.push(Math.hypot(gx, gy));
+    }
+  }
+  mag.sort((a, b) => a - b);
+  const T = mag[Math.floor(mag.length * 0.85)] || 1;
+  const v = new Uint8Array(W * H), h = new Uint8Array(W * H);
+  for (let i = 0; i < v.length; i++) {
+    if (Math.hypot(ax[i], ay[i]) > T) {
+      if (ax[i] > 1.5 * ay[i]) v[i] = 1;
+      else if (ay[i] > 1.5 * ax[i]) h[i] = 1;
+    }
+  }
+  // nur lange Linien behalten (mind. 5 % der Bildgröße am Stück, 1 px Wackeln erlaubt)
+  const L = Math.round(0.05 * Math.max(W, H));
+  const vl = longLines(v, W, H, L, true);
+  const hl = longLines(h, W, H, L, false);
+
+  const RATIO = CARD_RATIO;
+  const range = (a, b) => { const r = []; for (let i = Math.max(1, Math.floor(a)); i <= Math.ceil(b); i++) r.push(i); return r; };
+  const gaps = [];
+  for (let gp = 0; gp <= 40; gp += 2) gaps.push(gp);
+
+  // 1) Spalten grob, 2) Zeilen innerhalb der Spalten, 3) Spalten innerhalb der Zeilen
+  let fx = fit(profile(vl, W, H, 0, H, 0, W, true), cols, range(0.35 * W / cols, 0.98 * W / cols), gaps);
+  if (!fx) return null;
+  let x1 = fx.start + cols * fx.size + (cols - 1) * fx.gap;
+  let fy = fit(profile(hl, W, H, 0, H, fx.start, x1, false), rows, range(fx.size / RATIO * 0.85, fx.size / RATIO * 1.15), gaps);
+  if (!fy) return null;
+  const y1 = fy.start + rows * fy.size + (rows - 1) * fy.gap;
+  fx = fit(profile(vl, W, H, fy.start, y1, 0, W, true), cols, range(fy.size * RATIO * 0.85, fy.size * RATIO * 1.15), gaps);
+  if (!fx) return null;
+  x1 = fx.start + cols * fx.size + (cols - 1) * fx.gap;
+  // Zeilen nochmal mit den genaueren Spalten
+  const fy2 = fit(profile(hl, W, H, 0, H, fx.start, x1, false), rows, range(fx.size / RATIO * 0.9, fx.size / RATIO * 1.1), gaps);
+  if (fy2) { fy.start = fy2.start; fy.size = fy2.size; fy.gap = fy2.gap; fy.weakest = fy2.weakest; }
+  const yEnd = fy.start + rows * fy.size + (rows - 1) * fy.gap;
+
+  // Sicher genug? Jede gefundene Kante muss ein gutes Stück lang sein
+  if (fx.weakest < 0.12 * (yEnd - fy.start) || fy.weakest < 0.12 * (x1 - fx.start)) return null;
+  return { x: fx.start / scale, y: fy.start / scale, w: (x1 - fx.start) / scale, h: (yEnd - fy.start) / scale };
+}
+
+function longLines(m, W, H, L, vertical) {
+  const res = new Uint8Array(W * H);
+  const n = vertical ? H : W, lines = vertical ? W : H;
+  for (let a = 0; a < lines; a++) {
+    // Pixel (mit Nachbar ±1 quer zur Linie) entlang der Linie zählen, gleitendes Fenster
+    const at = k => {
+      const idx = vertical ? k * W + a : a * W + k;
+      const step = vertical ? 1 : W;
+      return m[idx] || (a > 0 && m[idx - step]) || (a < lines - 1 && m[idx + step]) ? 1 : 0;
+    };
+    const vals = new Uint8Array(n);
+    for (let k = 0; k < n; k++) vals[k] = at(k);
+    let run = 0;
+    for (let k = 0; k < n; k++) {
+      run += vals[k] - (k >= L ? vals[k - L] : 0);
+      if (k >= L - 1 && run >= 0.85 * L) {
+        for (let q = k - L + 1; q <= k; q++) res[vertical ? q * W + a : a * W + q] = 1;
+      }
+    }
+  }
+  return res;
+}
+
+// Summe der Linienpixel pro Spalte (vertical) bzw. Zeile, nur im angegebenen Bereich
+function profile(m, W, H, y0, y1, x0, x1, vertical) {
+  const p = new Float32Array(vertical ? W : H);
+  for (let y = Math.max(0, y0); y < Math.min(H, y1); y++) {
+    for (let x = Math.max(0, x0); x < Math.min(W, x1); x++) {
+      if (m[y * W + x]) p[vertical ? x : y]++;
+    }
+  }
+  // leicht glätten (Kante darf 1 px daneben liegen)
+  const s = new Float32Array(p.length);
+  for (let i = 0; i < p.length; i++) s[i] = p[i] + 0.5 * ((p[i - 1] || 0) + (p[i + 1] || 0));
+  return s;
+}
+
+// Beste Lage für n Karten: Kanten bei start + k·(size+gap) und start + k·(size+gap) + size
+function fit(P, n, sizes, gaps) {
+  let best = null;
+  const N = P.length;
+  for (const size of sizes) {
+    for (const gap of gaps) {
+      const span = n * size + (n - 1) * gap;
+      if (span >= N) continue;
+      for (let start = 0; start < N - span; start++) {
+        let sum = 0, min = Infinity;
+        for (let k = 0; k < n; k++) {
+          const a = P[start + k * (size + gap)], b = P[start + k * (size + gap) + size];
+          sum += a + b;
+          if (a < min) min = a;
+          if (b < min) min = b;
+        }
+        const score = sum + min * n; // fehlende Kanten bestrafen
+        if (!best || score > best.score) best = { score, start, size, gap, weakest: min };
+      }
+    }
+  }
+  return best;
 }

@@ -42,8 +42,9 @@ export function cropCell(source, rect, rows, cols, index) {
   const x0 = rect.x + c * cw, y0 = rect.y + r * ch;
   const card = cropCanvas(source, x0 + cw * inset, y0 + ch * inset, cw * (1 - 2 * inset), ch * (1 - 2 * inset));
   card.wide = () => {
+    // nach unten großzügiger: liegt der Rahmen etwas zu hoch, steht die Nummer sonst außerhalb
     const gx = Math.max(0, x0 - cw * grow), gy = Math.max(0, y0 - ch * grow);
-    const gx2 = Math.min(source.width, x0 + cw * (1 + grow)), gy2 = Math.min(source.height, y0 + ch * (1 + grow));
+    const gx2 = Math.min(source.width, x0 + cw * (1 + grow)), gy2 = Math.min(source.height, y0 + ch * (1 + 2.5 * grow));
     return cropCanvas(source, gx, gy, gx2 - gx, gy2 - gy);
   };
   return card;
@@ -170,29 +171,54 @@ function sharpen(d, width, height, r, amount) {
 const REGION_NUMBER = { x: 0, y: 0.84, w: 1, h: 0.16 };
 const REGION_NAME = { x: 0.02, y: 0.02, w: 0.72, h: 0.12 };
 const REGION_NUMBER_WIDE = { x: 0, y: 0.68, w: 1, h: 0.32 };
-const REGION_ALL = { x: 0, y: 0, w: 1, h: 1 };
-
-let workerPromise = null;
 
 function absolute(path) {
   return new URL(path, document.baseURI).href;
 }
 
-/** Startet die Texterkennung (einmalig, lädt ca. 6 MB beim ersten Mal). */
-export function getOcrWorker() {
-  if (!workerPromise) {
-    workerPromise = window.Tesseract.createWorker('eng', 1, {
-      workerPath: absolute('vendor/tesseract/worker.min.js'),
-      corePath: absolute('vendor/tesseract/core/'),
-      langPath: absolute('vendor/tesseract/lang'),
-      gzip: true,
-    }).catch(err => { workerPromise = null; throw err; });
-  }
-  return workerPromise;
+// Zwei Texterkennungen parallel (Handys haben mehrere Kerne): fast doppelt so schnell
+export const OCR_PARALLEL = Math.max(1, Math.min(2, (navigator.hardwareConcurrency || 2) - 1));
+let poolPromise = null;
+const idle = [];
+const waiting = [];
+
+function createWorker() {
+  return window.Tesseract.createWorker('eng', 1, {
+    workerPath: absolute('vendor/tesseract/worker.min.js'),
+    corePath: absolute('vendor/tesseract/core/'),
+    langPath: absolute('vendor/tesseract/lang'),
+    gzip: true,
+  });
 }
 
-async function ocr(canvas, params) {
-  const worker = await getOcrWorker();
+/** Startet die Texterkennung (einmalig, lädt ca. 6 MB beim ersten Mal). */
+export function getOcrWorker() {
+  if (!poolPromise) {
+    poolPromise = (async () => {
+      const first = await createWorker();
+      idle.push(first);
+      // weitere im Hintergrund; klappt das nicht (wenig Speicher), reicht einer
+      for (let i = 1; i < OCR_PARALLEL; i++) {
+        createWorker().then(w => release(w)).catch(() => {});
+      }
+      return true;
+    })().catch(err => { poolPromise = null; throw err; });
+  }
+  return poolPromise;
+}
+
+async function acquire() {
+  await getOcrWorker();
+  if (idle.length) return idle.pop();
+  return new Promise(resolve => waiting.push(resolve));
+}
+
+function release(worker) {
+  const next = waiting.shift();
+  if (next) next(worker); else idle.push(worker);
+}
+
+async function ocr(worker, canvas, params) {
   await worker.setParameters(params);
   try {
     const { data } = await worker.recognize(canvas);
@@ -206,46 +232,56 @@ async function ocr(canvas, params) {
 
 /**
  * Liest Nummer (+ Set-Kürzel) und Name von einer einzelnen Karte.
- * @returns {Promise<{number?:string,total?:string,setCode?:string,name?:string,rawNumber:string,rawName:string}>}
+ * @param {(n:{number:string,total?:string,setCode?:string}) => boolean|Promise<boolean>} [validate]
+ *   prüft, ob es die gelesene Nummer wirklich gibt (Kartenliste). Wenn nicht, wird weiter gelesen.
+ * @returns {Promise<{number?:string,total?:string,setCode?:string,name?:string,rawNumber:string,rawName:string,valid?:boolean}>}
  */
-export async function readCard(card) {
+export async function readCard(card, validate = null) {
   const numberParams = {
     tessedit_pageseg_mode: '11',
     tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/',
   };
   // Mehrere Versuche: normal, invertiert (helle Schrift auf dunklem Grund,
-  // z. B. Full-Art-Karten) und mit größerem Ausschnitt (schief fotografiert)
+  // z. B. Full-Art-Karten) und mit größerem Ausschnitt (schief fotografiert / Rahmen ungenau)
   let wide = null;
   const getWide = () => (wide ||= card.wide());
   const attempts = [
     () => prepareForOcr(card, REGION_NUMBER),
+    () => prepareForOcr(card, REGION_NUMBER, { binarize: 'dark' }),
     () => prepareForOcr(card, REGION_NUMBER, { invert: true }),
   ];
-  attempts.push(() => prepareForOcr(card, REGION_NUMBER, { binarize: 'dark' }));
-  if (card.wide) {
-    attempts.push(() => prepareForOcr(getWide(), REGION_NUMBER_WIDE, { binarize: 'dark' }));
-    attempts.push(() => prepareForOcr(getWide(), REGION_NUMBER_WIDE, { binarize: 'light' }));
-    // Letzter Versuch: ganze Fläche absuchen (Karte liegt z. B. klein in der Mitte des Fotos)
-    attempts.push(() => prepareForOcr(getWide(), REGION_ALL, { binarize: 'dark', targetWidth: 2600 }));
-  } else {
-    // Automatisch ausgeschnittene Karte: der Ausschnitt passt genau, nur der Bereich unten etwas größer
-    attempts.push(() => prepareForOcr(card, REGION_NUMBER_WIDE, { binarize: 'dark' }));
-    attempts.push(() => prepareForOcr(card, REGION_NUMBER_WIDE, { binarize: 'light' }));
+  const big = card.wide ? getWide : () => card;
+  attempts.push(() => prepareForOcr(big(), REGION_NUMBER_WIDE, { binarize: 'dark' }));
+  attempts.push(() => prepareForOcr(big(), REGION_NUMBER_WIDE, { binarize: 'light' }));
+
+  const worker = await acquire();
+  try {
+    let rawNumber = '';
+    let parsed = null;
+    let valid = false;
+    for (const attempt of attempts) {
+      const text = await ocr(worker, attempt(), numberParams);
+      rawNumber += (rawNumber ? '\n---\n' : '') + text;
+      for (const cand of parseNumberCandidates(text)) {
+        if (!validate) { parsed = cand; break; }
+        if (await validate(cand)) { parsed = cand; valid = true; break; }
+        parsed ||= cand; // unsicher, aber besser als nichts
+      }
+      if (parsed && (!validate || valid)) break;
+    }
+    freeCanvas(wide);
+    // Name nur lesen, wenn die Nummer nicht eindeutig ist (spart Zeit)
+    let rawName = '';
+    if (!valid) {
+      rawName = await ocr(worker, prepareForOcr(card, REGION_NAME), {
+        tessedit_pageseg_mode: '6',
+        tessedit_char_whitelist: '',
+      });
+    }
+    return { ...(parsed || {}), name: parseNameText(rawName), rawNumber, rawName, valid };
+  } finally {
+    release(worker);
   }
-  let rawNumber = '';
-  let parsed = null;
-  for (const attempt of attempts) {
-    const text = await ocr(attempt(), numberParams);
-    rawNumber += (rawNumber ? '\n---\n' : '') + text;
-    parsed = parseNumberText(text);
-    if (parsed) break;
-  }
-  freeCanvas(wide);
-  const rawName = await ocr(prepareForOcr(card, REGION_NAME), {
-    tessedit_pageseg_mode: '6',
-    tessedit_char_whitelist: '',
-  });
-  return { ...(parsed || {}), name: parseNameText(rawName), rawNumber, rawName };
 }
 
 // ---------- Text auswerten (ohne Browser-Abhängigkeiten, daher testbar) ----------
@@ -261,18 +297,26 @@ const LANG_CODES = 'DE|EN|IT|FR|ES|PT|JP|NL|KO|ZH';
  * @returns {{number:string,total?:string,setCode?:string}|null}
  */
 export function parseNumberText(raw) {
+  return parseNumberCandidates(raw)[0] || null;
+}
+
+/** Alle Kartennummern, die im OCR-Text stecken könnten (beste zuerst). */
+export function parseNumberCandidates(raw) {
   const text = String(raw).toUpperCase().replace(/[\\|]/g, '/');
   const lines = text.split(/\n+/);
+  const found = [];
+  const add = r => { if (r && !found.some(f => f.number === r.number && f.total === r.total)) found.push(r); };
   for (const line of lines) {
     // Set-Kürzel + Sprache direkt vor der Nummer, z. B. "MEW DE 025/165" (OCR verschluckt oft die Leerzeichen)
-    const setMatch = line.match(new RegExp(`([A-Z]{3})\\s*(?:${LANG_CODES})\\s*${DIGITISH}{1,3}\\s*/`));
+    // (Sprachkürzel fehlt bei englischen Karten oder wird nicht gelesen)
+    const setMatch = line.match(new RegExp(`([A-Z]{3})\\s*(?:${LANG_CODES})?\\s*${DIGITISH}{1,3}\\s*/`));
     const setCode = setMatch ? setMatch[1] : undefined;
 
     const re = /([A-Z0-9]{1,8})\s*\/\s*([A-Z0-9]{2,6})/g;
     let m;
     while ((m = re.exec(line))) {
       const result = interpretPair(m[1], m[2]);
-      if (result) return setCode ? { ...result, setCode } : result;
+      if (result) add(setCode ? { ...result, setCode } : result);
     }
 
     // Schrägstrich nicht erkannt ("MEWDE004165" oder "MEW DE 004 1 165"):
@@ -280,13 +324,13 @@ export function parseNumberText(raw) {
     const glued = line.match(new RegExp(`([A-Z]{3})\\s*(?:${LANG_CODES})\\s*(${DIGITISH}{3})\\s*[1IL]?\\s*(${DIGITISH}{3})(?![0-9])`));
     if (glued) {
       const result = interpretPair(glued[2], glued[3]);
-      if (result) return { ...result, setCode: glued[1] };
+      if (result) add({ ...result, setCode: glued[1] });
     }
 
     const promo = line.match(new RegExp(`\\b(SWSH|SM|XY|BW)\\s?(${DIGITISH}{2,3})\\b`));
-    if (promo) return { number: promo[1] + fixDigits(promo[2]) };
+    if (promo) add({ number: promo[1] + fixDigits(promo[2]) });
   }
-  return null;
+  return found;
 }
 
 function interpretPair(a, b) {

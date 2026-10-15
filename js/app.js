@@ -1,8 +1,9 @@
 import * as store from './store.js';
 import { findCards, fetchPrice, normalizeNumber, OfflineError } from './api.js';
-import { loadImage, toCanvas, cropCell, freeCanvas, readCard, getOcrWorker, parseNumberText } from './scanner.js';
+import { loadImage, toCanvas, cropCell, freeCanvas, readCard, getOcrWorker, parseNumberText, OCR_PARALLEL } from './scanner.js';
+import { loadCardsDb, existsLocal } from './cards-db.js';
 import * as scanState from './scan-state.js';
-import { detectCards, warpCard } from './detect.js';
+import { detectCards, warpCard, fitGrid } from './detect.js';
 
 const $ = sel => document.querySelector(sel);
 const el = (tag, attrs = {}, ...children) => {
@@ -237,7 +238,7 @@ function persistScan(step) {
     step,
     layout: scan.layout,
     current: scan.current,
-    photos: scan.photos.map(({ id, rect, quads, forced, rectTouched }) => ({ id, rect, quads, forced, rectTouched })),
+    photos: scan.photos.map(({ id, rect, quads, forced, rectTouched, fitLayout, fitted }) => ({ id, rect, quads, forced, rectTouched, fitLayout, fitted })),
     items: scan.items,
     stats: scan.stats,
   });
@@ -266,6 +267,7 @@ function addPhotos(blobs) {
   showPhoto(first);
   if (blobs.length > 1) toast(`${blobs.length} Fotos hinzugefügt`);
   getOcrWorker().catch(() => {}); // Texterkennung schon mal im Hintergrund laden
+  loadCardsDb();
 }
 
 const layoutDims = () => scan.layout.split('x').map(Number); // [rows, cols]
@@ -304,6 +306,7 @@ async function showPhoto(index) {
     return;
   }
   if (token !== showToken) { freeCanvas(canvas); return; }
+  if (photo.quads !== undefined) autoFrame(photo, canvas); // Raster evtl. inzwischen geändert
   photo.rect ||= defaultRect(canvas);
   scan.source = canvas;
   drawCrop();
@@ -325,13 +328,28 @@ async function ensureDetected(photo, canvas) {
   } catch {
     photo.quads = null; // OpenCV fehlt/klappt nicht auf diesem Handy -> Raster
   }
-  // Gelben Rahmen schon mal um die gefundenen Karten legen
-  if (photo.quads?.length && !photo.rectTouched) {
+  autoFrame(photo, canvas);
+  photo.rect ||= defaultRect(canvas);
+}
+
+// Gelben Rahmen automatisch legen (solange man ihn nicht selbst verschoben hat):
+// an die Kartenfächer der Album-Seite, sonst um die gefundenen Karten
+function autoFrame(photo, canvas) {
+  if (photo.rectTouched || photo.fitLayout === scan.layout) return;
+  photo.fitLayout = scan.layout;
+  photo.fitted = false;
+  if (photo.quads?.length === perPhoto()) return; // Karten einzeln gefunden, Rahmen unnötig
+  const [rows, cols] = layoutDims();
+  let rect = null;
+  try { rect = fitGrid(canvas, rows, cols); } catch { /* dann eben nicht */ }
+  if (rect) {
+    photo.rect = rect;
+    photo.fitted = true;
+  } else if (photo.quads?.length) {
     const xs = photo.quads.flat().map(p => p.x), ys = photo.quads.flat().map(p => p.y);
     const x = Math.max(0, Math.min(...xs)), y = Math.max(0, Math.min(...ys));
     photo.rect = { x, y, w: Math.min(canvas.width, Math.max(...xs)) - x, h: Math.min(canvas.height, Math.max(...ys)) - y };
   }
-  photo.rect ||= defaultRect(canvas);
 }
 
 function renderPhotoNav() {
@@ -365,6 +383,9 @@ function renderDetectInfo() {
   } else if (n === exp) {
     msg = el('div', { class: 'msg' }, 'Raster im gelben Rahmen.', el('br'),
       btn(`Die ${n} automatisch gefundenen Karten nehmen`, 'auto'));
+  } else if (photo.fitted) {
+    msg = el('div', { class: 'msg ok' },
+      '✅ Rahmen automatisch an die Kartenfächer gelegt. Bitte kurz prüfen: jede Karte in einem Feld?');
   } else if (n) {
     msg = el('div', { class: 'msg warn' },
       `⚠️ Automatisch ${n} von ${exp} Karten gefunden. Bitte den gelben Rahmen prüfen.`,
@@ -479,6 +500,8 @@ function setLayout(layout) {
   scan.layout = layout;
   store.setSetting('layout', layout);
   for (const b of document.querySelectorAll('#layoutPicker button')) b.classList.toggle('active', b.dataset.layout === layout);
+  const photo = currentPhoto();
+  if (photo && scan.source && photo.quads !== undefined) autoFrame(photo, scan.source);
   drawCrop();
   renderDetectInfo();
 }
@@ -584,6 +607,7 @@ function onCropMove(e) {
   const W = scan.source.width, H = scan.source.height;
   const r = photo.rect;
   photo.rectTouched = true;
+  photo.fitted = false;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const min = Math.min(W, H) * 0.08;
   if (crop.drag.type === 'move') {
@@ -633,6 +657,10 @@ async function recognize() {
     return;
   }
 
+  // Gelesene Nummer gegen die Kartenliste prüfen: gibt es sie nicht, liest die App weiter
+  const db = await loadCardsDb();
+  const validate = db ? n => existsLocal(db, n) : null;
+
   showToken++; // laufendes Laden der Vorschau abbrechen
   freeCanvas(scan.source);
   scan.source = null;
@@ -656,27 +684,29 @@ async function recognize() {
       text.textContent = `${prefix}suche Karten …`;
       await ensureDetected(photo, source);
     }
+    autoFrame(photo, source);
     photo.rect ||= defaultRect(source);
     const mode = modeOf(photo);
     const cells = mode === 'auto' ? photo.quads.length : exp;
     st.mode = mode;
     st.found = cells;
 
-    for (let j = 0; j < cells; j++) {
-      text.textContent = `${prefix}Karte ${j + 1} von ${cells} …`;
+    const results = new Array(cells);
+    let done = 0;
+    text.textContent = `${prefix}lese ${cells} ${cells === 1 ? 'Karte' : 'Karten'} …`;
+    const readOne = async j => {
       const item = { photo: p, slot: j, thumb: '', read: {}, candidates: [], chosenId: null, include: false, error: '' };
       let cell = null;
       try {
-        // immer nur eine Karte im Speicher
+        // höchstens so viele Karten gleichzeitig im Speicher, wie parallel gelesen werden
         cell = mode === 'auto' ? await warpCard(source, photo.quads[j]) : cropCell(source, photo.rect, rows, cols, j);
         item.thumb = thumb(cell);
-        item.read = await readCard(cell);
+        item.read = await readCard(cell, validate);
       } catch {
         item.error = 'Die Karte konnte nicht gelesen werden.';
       }
       freeCanvas(cell);
       if (!item.error && (item.read.number || item.read.name)) {
-        text.textContent = `${prefix}Karte ${j + 1} von ${cells}: suche in der Datenbank …`;
         try {
           item.candidates = await findCards(item.read);
         } catch (err) {
@@ -684,9 +714,16 @@ async function recognize() {
         }
       }
       preselect(item);
-      scan.items.push(item);
-      bar.style.width = `${Math.round(((p + (j + 1) / cells) / total) * 100)}%`;
-    }
+      results[j] = item;
+      done++;
+      text.textContent = `${prefix}${done} von ${cells} ${cells === 1 ? 'Karte' : 'Karten'} gelesen …`;
+      bar.style.width = `${Math.round(((p + done / cells) / total) * 100)}%`;
+    };
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(OCR_PARALLEL, cells) }, async () => {
+      while (next < cells) await readOne(next++);
+    }));
+    scan.items.push(...results);
     freeCanvas(source);
     persistScan('grid'); // Fortschritt (gefundene Karten) merken
   }
@@ -699,8 +736,17 @@ async function recognize() {
 function preselect(item) {
   const c = item.candidates;
   const ocrName = (item.read.name || '').toLowerCase();
+  // Set-Kürzel: gelesen oder irgendwo im erkannten Text (OCR trennt "DRI" oft von "104/182")
+  const code = (item.read.setCode || '').toUpperCase();
+  const raw = String(item.read.rawNumber || '').toUpperCase();
+  let byCode = code ? c.filter(x => x.set?.ptcgoCode === code) : [];
+  if (byCode.length !== 1 && c.length > 1) {
+    byCode = c.filter(x => x.set?.ptcgoCode && new RegExp(`(^|[^A-Z])${x.set.ptcgoCode}`).test(raw));
+  }
   if (c.length === 1 && item.read.number) {
     item.chosenId = c[0].id;
+  } else if (byCode.length === 1 && item.read.number) {
+    item.chosenId = byCode[0].id;
   } else if (c.length > 1 && item.read.number && ocrName && c[0].name.toLowerCase().startsWith(ocrName)) {
     item.chosenId = c[0].id;
   } else {

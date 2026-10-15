@@ -16,9 +16,12 @@ Die App läuft im Chrome-Browser und lässt sich wie eine normale App auf den St
   und der Name gelesen. Alles läuft auf dem Handy, ohne Cloud-Dienst und kostenlos.
 - **Statistik:** Nach dem Erkennen zeigt die App, wie viele Fotos es waren, wie viele Karten erwartet
   wurden (Fotos × Raster), wie viele erkannt wurden und was fehlt – auch pro Foto.
-- **Suche über die Nummer:** Die Nummer ist in jeder Sprache gleich, deshalb wird primär damit
-  in der [Pokémon TCG API](https://pokemontcg.io) gesucht; der Name dient nur zur Sortierung.
-  Kommen mehrere Karten in Frage, tippt man einfach das richtige Bild an.
+- **Suche über die Nummer – direkt auf dem Handy:** Die Nummer ist in jeder Sprache gleich. Die App hat
+  eine Liste aller Karten der [Pokémon TCG API](https://pokemontcg.io) dabei (`data/cards.json`, ca. 20 600 Karten,
+  0,8 MB) und sucht darin sofort und ohne Limit. Jede gelesene Nummer wird damit gleich geprüft: gibt es sie
+  nicht, liest die App nochmal. Die Liste wird einmal pro Woche automatisch neu gebaut.
+  Kommen mehrere Karten in Frage (gleiche Nummer in zwei Sets), tippt man einfach das richtige Bild an.
+  Karten, die es nur auf Chinesisch/Japanisch gibt, stehen nicht in der Liste.
 - **Bereits vorhanden:** Doppelte Karten werden markiert („Karte bereits vorhanden“) und nur auf
   Wunsch als weiteres Exemplar (+1) gezählt.
 - **Von Hand:** Klappt die Erkennung nicht, kann man die Nummer direkt im Ergebnis oder unter
@@ -69,7 +72,9 @@ Zum Ausprobieren am Computer: im Ordner `npx serve .` (oder `python3 -m http.ser
 | `js/scanner.js` | Foto laden, Raster zuschneiden, Texterkennung, Nummer/Name aus dem Text lesen |
 | `js/detect.js` | Karten automatisch auf dem Foto finden und gerade ausschneiden (OpenCV) |
 | `js/scan-state.js` | Laufenden Scan sichern (falls Android den Tab neu lädt) |
-| `js/api.js` | Suche und Preise über die Pokémon TCG API |
+| `js/cards-db.js`, `data/cards.json` | Kartenliste auf dem Handy, Suche nach Nummer / Set / Name |
+| `scripts/build-cards.mjs` | baut `data/cards.json` aus den offenen Daten (github.com/PokemonTCG/pokemon-tcg-data) |
+| `js/api.js` | Preise über die Pokémon TCG API (und Ersatz-Suche, falls die Liste fehlt) |
 | `js/store.js` | Sammlungen pro Kind, Sicherung |
 | `sw.js`, `manifest.webmanifest`, `icons/` | Installierbarkeit (PWA) |
 | `vendor/tesseract/` | Texterkennung Tesseract.js 5.1.1 (Apache-2.0), lokal eingebunden |

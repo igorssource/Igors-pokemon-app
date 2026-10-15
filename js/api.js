@@ -3,6 +3,7 @@
 // englischen, italienischen … Karten gleich ist. Der Name ist nur ein Zusatz.
 
 import { getSetting } from './store.js';
+import { loadCardsDb, searchLocal } from './cards-db.js';
 
 const BASE = 'https://api.pokemontcg.io/v2';
 const CARD_FIELDS = 'id,name,number,rarity,set,images';
@@ -91,6 +92,11 @@ async function query(q) {
  * @param {{number?: string, total?: string|number, setCode?: string, name?: string}} info
  */
 export async function findCards({ number, total, setCode, name }) {
+  // Zuerst in der Kartenliste auf dem Handy (sofort, ohne Limit)
+  const db = await loadCardsDb();
+  if (db) return rankByName(searchLocal(db, { number, total, setCode, name }), name);
+
+  // Nur falls die Liste nicht geladen werden konnte: online suchen
   const tries = [];
   const num = number ? normalizeNumber(number) : '';
   const tot = total && /^\d+$/.test(String(total)) ? parseInt(total, 10) : null;
