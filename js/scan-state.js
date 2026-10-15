@@ -1,7 +1,7 @@
-// Merkt sich einen laufenden Scan (Foto, Rahmen, Ergebnisse), damit nichts
+// Merkt sich einen laufenden Scan (Fotos, Rahmen, Ergebnisse), damit nichts
 // verloren geht, wenn Android den Browser-Tab im Hintergrund neu lädt
 // (z. B. während die Kamera-App offen ist oder bei knappem Speicher).
-// Foto -> IndexedDB, Rest -> sessionStorage. Beides wird nach Speichern/Abbrechen gelöscht.
+// Fotos -> IndexedDB, Rest -> sessionStorage. Beides wird nach Speichern/Abbrechen gelöscht.
 
 const DB = 'pkmn-tracker-scan';
 const STORE = 'photo';
@@ -30,13 +30,17 @@ async function tx(mode, fn) {
   }
 }
 
-export async function savePhoto(canvas) {
-  const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
-  if (blob) await tx('readwrite', s => s.put(blob, 'current'));
+/** Speichert ein Foto des Stapels unter seiner id (Blob bzw. Datei). */
+export async function savePhoto(id, blob) {
+  if (blob) await tx('readwrite', s => s.put(blob, id));
 }
 
-export async function loadPhoto() {
-  return tx('readonly', s => s.get('current'));
+export async function loadPhoto(id) {
+  return tx('readonly', s => s.get(id));
+}
+
+export async function deletePhoto(id) {
+  try { await tx('readwrite', s => s.delete(id)); } catch { /* ignorieren */ }
 }
 
 export function saveMeta(meta) {
@@ -49,5 +53,5 @@ export function loadMeta() {
 
 export async function clearScan() {
   try { sessionStorage.removeItem(META_KEY); } catch { /* ignorieren */ }
-  try { await tx('readwrite', s => s.delete('current')); } catch { /* ignorieren */ }
+  try { await tx('readwrite', s => s.clear()); } catch { /* ignorieren */ }
 }

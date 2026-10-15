@@ -2,6 +2,7 @@ import * as store from './store.js';
 import { findCards, fetchPrice, normalizeNumber, OfflineError } from './api.js';
 import { loadImage, toCanvas, cropCell, freeCanvas, readCard, getOcrWorker, parseNumberText } from './scanner.js';
 import * as scanState from './scan-state.js';
+import { detectCards, warpCard } from './detect.js';
 
 const $ = sel => document.querySelector(sel);
 const el = (tag, attrs = {}, ...children) => {
@@ -53,7 +54,7 @@ function showView(name, { keepScan = false } = {}) {
   for (const v of document.querySelectorAll('.view')) v.hidden = v.id !== `view-${name}`;
   for (const b of document.querySelectorAll('.bottombar button')) b.classList.toggle('active', b.dataset.view === name);
   if (name === 'collection') renderCollection();
-  if (name === 'scan' && !keepScan && !scan.source && !scan.items.length) resetScan();
+  if (name === 'scan' && !keepScan && !scan.photos.length && !scan.items.length) resetScan();
   scrollTo(0, 0);
 }
 
@@ -202,12 +203,17 @@ function renderPrice(target, { cardmarket, tcgplayer }) {
 }
 
 // ---------- Karten scannen ----------
+// Ein Stapel aus einem oder mehreren Fotos (z. B. ein ganzes Album, eine Seite pro Foto).
+// Auf jedem Foto sucht die App die Karten automatisch; klappt das nicht, gilt das
+// Raster mit dem gelben Rahmen. Das Raster (1 / 4 / 9) gilt für den ganzen Stapel.
 
 const scan = {
-  source: null,   // Canvas mit dem Foto
-  rect: null,     // markierter Bereich in Bildpixeln
+  photos: [],     // { id, blob, rect, quads, forced, rectTouched }
+  current: 0,     // welches Foto gerade angezeigt wird
+  source: null,   // Canvas des angezeigten Fotos (immer nur eins im Speicher)
   layout: store.getSetting('layout') || '3x3',
-  items: [],
+  items: [],      // Ergebnisse: { photo, slot, thumb, read, candidates, chosenId, include, error }
+  stats: null,    // { expected, photos: [{ expected, found, mode, error }] }
 };
 
 function showScanStep(id) {
@@ -217,41 +223,172 @@ function showScanStep(id) {
 function resetScan() {
   freeCanvas(scan.source);
   scan.source = null;
+  scan.photos = [];
+  scan.current = 0;
   scan.items = [];
-  $('#cameraInput').value = '';
-  $('#fileInput').value = '';
+  scan.stats = null;
+  for (const id of ['#cameraInput', '#fileInput', '#addCameraInput', '#addFileInput']) $(id).value = '';
   scanState.clearScan();
   showScanStep('scanStepPick');
 }
 
 function persistScan(step) {
-  scanState.saveMeta({ step, rect: scan.rect, layout: scan.layout, items: scan.items });
+  scanState.saveMeta({
+    step,
+    layout: scan.layout,
+    current: scan.current,
+    photos: scan.photos.map(({ id, rect, quads, forced, rectTouched }) => ({ id, rect, quads, forced, rectTouched })),
+    items: scan.items,
+    stats: scan.stats,
+  });
 }
 
-async function onPhoto(e) {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  let canvas;
-  try {
-    canvas = await loadImage(file);
-  } catch {
-    toast('Das Foto konnte nicht geöffnet werden.');
-    return;
+const newId = () => `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+
+function onPhoto(e) {
+  const files = [...(e.target.files || [])];
+  e.target.value = '';
+  if (files.length) addPhotos(files);
+}
+
+// Neue Fotos hinten an den Stapel hängen und das erste davon zeigen
+function addPhotos(blobs) {
+  const first = scan.photos.length;
+  for (const blob of blobs) {
+    const photo = { id: newId(), blob, rect: null, quads: undefined, forced: null, rectTouched: false };
+    scan.photos.push(photo);
+    scanState.savePhoto(photo.id, blob).catch(() => {});
   }
-  startWithPhoto(canvas);
-}
-
-function startWithPhoto(canvas) {
-  freeCanvas(scan.source);
-  scan.source = canvas;
-  const { width: w, height: h } = canvas;
-  scan.rect = { x: w * 0.02, y: h * 0.02, w: w * 0.96, h: h * 0.96 };
   scan.items = [];
+  scan.stats = null;
   showScanStep('scanStepGrid');
   setLayout(scan.layout);
-  scanState.savePhoto(canvas).catch(() => {});
-  persistScan('grid');
+  showPhoto(first);
+  if (blobs.length > 1) toast(`${blobs.length} Fotos hinzugefügt`);
   getOcrWorker().catch(() => {}); // Texterkennung schon mal im Hintergrund laden
+}
+
+const layoutDims = () => scan.layout.split('x').map(Number); // [rows, cols]
+const perPhoto = () => { const [r, c] = layoutDims(); return r * c; };
+const currentPhoto = () => scan.photos[scan.current];
+
+// 'auto' = automatisch gefundene Karten (grün), 'grid' = Raster im gelben Rahmen
+function modeOf(photo) {
+  if (photo.forced === 'auto' && photo.quads?.length) return 'auto';
+  if (photo.forced === 'grid') return 'grid';
+  return photo.quads?.length === perPhoto() ? 'auto' : 'grid';
+}
+
+function defaultRect(canvas) {
+  const { width: w, height: h } = canvas;
+  return { x: w * 0.02, y: h * 0.02, w: w * 0.96, h: h * 0.96 };
+}
+
+let showToken = 0;
+async function showPhoto(index) {
+  const token = ++showToken;
+  scan.current = Math.max(0, Math.min(index, scan.photos.length - 1));
+  const photo = currentPhoto();
+  freeCanvas(scan.source);
+  scan.source = null;
+  renderPhotoNav();
+  renderDetectInfo();
+  let canvas;
+  try {
+    photo.blob ||= await scanState.loadPhoto(photo.id);
+    canvas = await loadImage(photo.blob);
+  } catch {
+    if (token !== showToken) return;
+    toast(`Foto ${scan.current + 1} konnte nicht geöffnet werden und wurde entfernt.`);
+    removePhoto(scan.current);
+    return;
+  }
+  if (token !== showToken) { freeCanvas(canvas); return; }
+  photo.rect ||= defaultRect(canvas);
+  scan.source = canvas;
+  drawCrop();
+  persistScan('grid');
+  if (photo.quads === undefined) {
+    await ensureDetected(photo, canvas);
+    if (token !== showToken) return;
+    drawCrop();
+    renderDetectInfo();
+    persistScan('grid');
+  }
+}
+
+// Karten auf dem Foto automatisch suchen (einmal pro Foto)
+async function ensureDetected(photo, canvas) {
+  if (photo.quads !== undefined) return;
+  try {
+    photo.quads = await detectCards(canvas);
+  } catch {
+    photo.quads = null; // OpenCV fehlt/klappt nicht auf diesem Handy -> Raster
+  }
+  // Gelben Rahmen schon mal um die gefundenen Karten legen
+  if (photo.quads?.length && !photo.rectTouched) {
+    const xs = photo.quads.flat().map(p => p.x), ys = photo.quads.flat().map(p => p.y);
+    const x = Math.max(0, Math.min(...xs)), y = Math.max(0, Math.min(...ys));
+    photo.rect = { x, y, w: Math.min(canvas.width, Math.max(...xs)) - x, h: Math.min(canvas.height, Math.max(...ys)) - y };
+  }
+  photo.rect ||= defaultRect(canvas);
+}
+
+function renderPhotoNav() {
+  const n = scan.photos.length;
+  $('#photoLabel').textContent = `Foto ${scan.current + 1} von ${n}`;
+  $('#photoPrev').disabled = scan.current === 0;
+  $('#photoNext').disabled = scan.current >= n - 1;
+  $('#scanRecognize').textContent = n > 1 ? `🔍 ${n} Fotos erkennen` : '🔍 Karten erkennen';
+}
+
+function renderDetectInfo() {
+  const box = $('#detectInfo');
+  const photo = currentPhoto();
+  if (!photo) { box.replaceChildren(); return; }
+  const exp = perPhoto();
+  const n = photo.quads?.length || 0;
+  const mode = modeOf(photo);
+  const btn = (label, forced) => el('button', {
+    class: 'small-btn',
+    onclick: () => { photo.forced = forced; drawCrop(); renderDetectInfo(); persistScan('grid'); },
+  }, label);
+  let msg;
+  if (photo.quads === undefined) {
+    msg = el('div', { class: 'msg' }, '🔎 Suche die Karten auf dem Foto … (beim ersten Mal dauert das etwas)');
+  } else if (photo.quads === null) {
+    msg = el('div', { class: 'msg warn' }, 'Automatische Suche klappt hier nicht. Bitte die gelben Ecken genau um die Karten ziehen.');
+  } else if (mode === 'auto') {
+    msg = el('div', { class: 'msg ok' },
+      `✅ ${n} ${n === 1 ? 'Karte' : 'Karten'} automatisch gefunden (grün umrandet).`, el('br'),
+      btn('Stimmt nicht? Rahmen selbst setzen', 'grid'));
+  } else if (n === exp) {
+    msg = el('div', { class: 'msg' }, 'Raster im gelben Rahmen.', el('br'),
+      btn(`Die ${n} automatisch gefundenen Karten nehmen`, 'auto'));
+  } else if (n) {
+    msg = el('div', { class: 'msg warn' },
+      `⚠️ Automatisch ${n} von ${exp} Karten gefunden. Bitte den gelben Rahmen prüfen.`,
+      [1, 4, 9].includes(n) ? ` Oder sind es ${n} Karten pro Foto? Dann oben „${n} ${n === 1 ? 'Karte' : 'Karten'}“ wählen.` : '',
+      el('br'),
+      btn(`Nur die ${n} gefundenen nehmen`, 'auto'));
+  } else {
+    msg = el('div', { class: 'msg warn' }, 'Keine Karten automatisch gefunden. Bitte die gelben Ecken genau um die Karten ziehen.');
+  }
+  box.replaceChildren(msg);
+}
+
+async function removePhoto(index) {
+  const [photo] = scan.photos.splice(index, 1);
+  if (photo) scanState.deletePhoto(photo.id);
+  if (!scan.photos.length) { resetScan(); return; }
+  await showPhoto(Math.min(index, scan.photos.length - 1));
+}
+
+async function askRemovePhoto() {
+  const ok = await ask('Foto entfernen?', `Foto ${scan.current + 1} wird aus diesem Stapel genommen.`, [
+    { label: '🗑️ Ja, entfernen', value: true, danger: true },
+  ]);
+  if (ok) removePhoto(scan.current);
 }
 
 // Nach einem Neuladen des Tabs: angefangenen Scan wiederherstellen
@@ -259,25 +396,25 @@ async function restoreScan() {
   const meta = scanState.loadMeta();
   if (!meta) return false;
   try {
+    scan.layout = meta.layout || scan.layout;
+    scan.photos = (meta.photos || []).map(p => ({ ...p, blob: null }));
     if (meta.step === 'results' && meta.items?.length) {
       scan.items = meta.items;
-      scan.layout = meta.layout || scan.layout;
+      scan.stats = meta.stats || null;
       showView('scan', { keepScan: true });
       renderResults();
       showScanStep('scanStepResults');
       return true;
     }
-    const blob = await scanState.loadPhoto();
-    if (!blob) return false;
-    scan.source = await loadImage(blob);
-    scan.rect = meta.rect;
-    scan.layout = meta.layout || scan.layout;
+    if (!scan.photos.length) { scanState.clearScan(); return false; }
     showView('scan', { keepScan: true });
     showScanStep('scanStepGrid');
     setLayout(scan.layout);
-    toast('Dein Foto ist noch da. Weiter geht\'s!');
+    await showPhoto(meta.current || 0);
+    toast(scan.photos.length > 1 ? 'Deine Fotos sind noch da. Weiter geht\'s!' : 'Dein Foto ist noch da. Weiter geht\'s!');
     return true;
   } catch {
+    scan.photos = [];
     scanState.clearScan();
     return false;
   }
@@ -333,7 +470,9 @@ async function takePicture() {
   }
   canvas ||= toCanvas(video, video.videoWidth, video.videoHeight);
   closeCamera();
-  startWithPhoto(canvas);
+  const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
+  freeCanvas(canvas);
+  if (blob) addPhotos([blob]);
 }
 
 function setLayout(layout) {
@@ -341,24 +480,48 @@ function setLayout(layout) {
   store.setSetting('layout', layout);
   for (const b of document.querySelectorAll('#layoutPicker button')) b.classList.toggle('active', b.dataset.layout === layout);
   drawCrop();
+  renderDetectInfo();
 }
 
-const layoutDims = () => scan.layout.split('x').map(Number); // [rows, cols]
-
-// Vorschau: Foto, abgedunkelter Rand, Rasterlinien, gelbe Ecken zum Ziehen
+// Vorschau: Foto mit grün umrandeten Karten (automatisch) oder
+// abgedunkeltem Rand, Rasterlinien und gelben Ecken zum Ziehen
 const crop = { scale: 1, drag: null };
 
 function drawCrop() {
   const canvas = $('#cropCanvas');
   const src = scan.source;
-  if (!src) return;
+  const photo = currentPhoto();
+  if (!src || !photo) return;
   crop.scale = Math.min(1, 1200 / Math.max(src.width, src.height));
   canvas.width = Math.round(src.width * crop.scale);
   canvas.height = Math.round(src.height * crop.scale);
   const ctx = canvas.getContext('2d');
   const s = crop.scale;
-  const r = { x: scan.rect.x * s, y: scan.rect.y * s, w: scan.rect.w * s, h: scan.rect.h * s };
   ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+  const lw = Math.max(2, canvas.width / 300);
+
+  if (modeOf(photo) === 'auto') {
+    ctx.lineWidth = lw * 1.5;
+    ctx.strokeStyle = '#1e9e5a';
+    ctx.font = `bold ${Math.round(canvas.width / 22)}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    photo.quads.forEach((q, i) => {
+      ctx.beginPath();
+      q.forEach((p, k) => (k ? ctx.lineTo(p.x * s, p.y * s) : ctx.moveTo(p.x * s, p.y * s)));
+      ctx.closePath();
+      ctx.stroke();
+      const cx = q.reduce((a, p) => a + p.x, 0) / 4 * s, cy = q.reduce((a, p) => a + p.y, 0) / 4 * s;
+      const r = canvas.width / 28;
+      ctx.fillStyle = '#1e9e5a';
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.fillText(String(i + 1), cx, cy);
+    });
+    return;
+  }
+
+  const r = { x: photo.rect.x * s, y: photo.rect.y * s, w: photo.rect.w * s, h: photo.rect.h * s };
   ctx.fillStyle = 'rgba(0,0,0,.55)';
   ctx.beginPath();
   ctx.rect(0, 0, canvas.width, canvas.height);
@@ -366,7 +529,6 @@ function drawCrop() {
   ctx.fill('evenodd');
 
   const [rows, cols] = layoutDims();
-  const lw = Math.max(2, canvas.width / 300);
   ctx.strokeStyle = '#ffcb05';
   ctx.lineWidth = lw;
   ctx.strokeRect(r.x, r.y, r.w, r.h);
@@ -403,9 +565,10 @@ function pointerPos(e) {
 }
 
 function onCropDown(e) {
-  if (!scan.source) return;
+  const photo = currentPhoto();
+  if (!scan.source || !photo || modeOf(photo) === 'auto') return;
   const p = pointerPos(e);
-  const r = scan.rect;
+  const r = photo.rect;
   const idx = corners(r).findIndex(([cx, cy]) => Math.hypot(cx - p.x, cy - p.y) < p.tol);
   if (idx >= 0) crop.drag = { type: 'corner', idx };
   else if (p.x > r.x && p.x < r.x + r.w && p.y > r.y && p.y < r.y + r.h) crop.drag = { type: 'move', dx: p.x - r.x, dy: p.y - r.y };
@@ -416,9 +579,11 @@ function onCropDown(e) {
 
 function onCropMove(e) {
   if (!crop.drag) return;
+  const photo = currentPhoto();
   const p = pointerPos(e);
   const W = scan.source.width, H = scan.source.height;
-  const r = scan.rect;
+  const r = photo.rect;
+  photo.rectTouched = true;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const min = Math.min(W, H) * 0.08;
   if (crop.drag.type === 'move') {
@@ -435,27 +600,30 @@ function onCropMove(e) {
   drawCrop();
 }
 
-function onCropUp() { crop.drag = null; }
+function onCropUp() {
+  if (crop.drag) persistScan('grid');
+  crop.drag = null;
+}
 
 function thumb(canvas) {
   const t = document.createElement('canvas');
-  const s = 220 / canvas.width;
-  t.width = 220;
+  const s = 200 / canvas.width;
+  t.width = 200;
   t.height = Math.round(canvas.height * s);
   t.getContext('2d').drawImage(canvas, 0, 0, t.width, t.height);
-  return t.toDataURL('image/jpeg', 0.8);
+  return t.toDataURL('image/jpeg', 0.75);
 }
 
 async function recognize() {
   const [rows, cols] = layoutDims();
-  const count = rows * cols;
+  const exp = rows * cols;
+  const total = scan.photos.length;
   persistScan('grid');
   showScanStep('scanStepProgress');
   const bar = $('#progressBar');
   const text = $('#progressText');
   bar.style.width = '0%';
   text.textContent = 'Texterkennung wird gestartet … (beim ersten Mal dauert das etwas)';
-  scan.items = [];
 
   try {
     await getOcrWorker();
@@ -465,31 +633,67 @@ async function recognize() {
     return;
   }
 
-  for (let i = 0; i < count; i++) {
-    text.textContent = `Karte ${i + 1} von ${count} …`;
-    const cell = cropCell(scan.source, scan.rect, rows, cols, i); // immer nur eine Karte im Speicher
-    const item = { thumb: thumb(cell), read: {}, candidates: [], chosenId: null, include: false, error: '' };
+  showToken++; // laufendes Laden der Vorschau abbrechen
+  freeCanvas(scan.source);
+  scan.source = null;
+  scan.items = [];
+  scan.stats = { expected: exp * total, photos: scan.photos.map(() => ({ expected: exp, found: 0, mode: 'grid', error: false })) };
+
+  for (let p = 0; p < total; p++) {
+    const photo = scan.photos[p];
+    const st = scan.stats.photos[p];
+    const prefix = total > 1 ? `Foto ${p + 1} von ${total}: ` : '';
+    text.textContent = `${prefix}wird geöffnet …`;
+    let source;
     try {
-      item.read = await readCard(cell);
+      photo.blob ||= await scanState.loadPhoto(photo.id);
+      source = await loadImage(photo.blob);
     } catch {
-      item.error = 'Die Karte konnte nicht gelesen werden.';
+      st.error = true;
+      continue;
     }
-    freeCanvas(cell);
-    if (!item.error && (item.read.number || item.read.name)) {
-      text.textContent = `Karte ${i + 1} von ${count}: suche in der Datenbank …`;
+    if (photo.quads === undefined) {
+      text.textContent = `${prefix}suche Karten …`;
+      await ensureDetected(photo, source);
+    }
+    photo.rect ||= defaultRect(source);
+    const mode = modeOf(photo);
+    const cells = mode === 'auto' ? photo.quads.length : exp;
+    st.mode = mode;
+    st.found = cells;
+
+    for (let j = 0; j < cells; j++) {
+      text.textContent = `${prefix}Karte ${j + 1} von ${cells} …`;
+      const item = { photo: p, slot: j, thumb: '', read: {}, candidates: [], chosenId: null, include: false, error: '' };
+      let cell = null;
       try {
-        item.candidates = await findCards(item.read);
-      } catch (err) {
-        item.error = errorText(err);
+        // immer nur eine Karte im Speicher
+        cell = mode === 'auto' ? await warpCard(source, photo.quads[j]) : cropCell(source, photo.rect, rows, cols, j);
+        item.thumb = thumb(cell);
+        item.read = await readCard(cell);
+      } catch {
+        item.error = 'Die Karte konnte nicht gelesen werden.';
       }
+      freeCanvas(cell);
+      if (!item.error && (item.read.number || item.read.name)) {
+        text.textContent = `${prefix}Karte ${j + 1} von ${cells}: suche in der Datenbank …`;
+        try {
+          item.candidates = await findCards(item.read);
+        } catch (err) {
+          item.error = errorText(err);
+        }
+      }
+      preselect(item);
+      scan.items.push(item);
+      bar.style.width = `${Math.round(((p + (j + 1) / cells) / total) * 100)}%`;
     }
-    preselect(item);
-    scan.items.push(item);
-    bar.style.width = `${Math.round(((i + 1) / count) * 100)}%`;
+    freeCanvas(source);
+    persistScan('grid'); // Fortschritt (gefundene Karten) merken
   }
   persistScan('results');
   renderResults();
   showScanStep('scanStepResults');
+  scrollTo(0, 0);
 }
 
 function preselect(item) {
@@ -510,9 +714,76 @@ function chosenCard(item) {
   return item.candidates.find(c => c.id === item.chosenId) || null;
 }
 
+const itemState = item => (chosenCard(item) ? 'ok' : item.candidates.length ? 'choose' : 'fail');
+
+// Statistik: Fotos, erwartete Karten (Fotos × Raster), erkannt, fehlt
+function renderStats() {
+  const box = $('#scanStats');
+  const st = scan.stats;
+  if (!st) { box.replaceChildren(); box.hidden = true; return; }
+  box.hidden = false;
+  const items = scan.items;
+  const ok = items.filter(it => itemState(it) === 'ok').length;
+  const choose = items.filter(it => itemState(it) === 'choose').length;
+  const missing = Math.max(0, st.expected - ok - choose);
+  const found = st.photos.reduce((a, p) => a + p.found, 0);
+  const tile = (n, label, cls = '') => el('div', { class: cls }, el('b', {}, String(n)), el('span', {}, label));
+
+  const summary = ok >= st.expected
+    ? el('div', { class: 'stats-summary ok' }, `✅ Alle ${st.expected} Karten erkannt`)
+    : el('div', { class: 'stats-summary warn' },
+      `⚠️ ${ok} von ${st.expected} Karten erkannt – ${st.expected - ok} ${st.expected - ok === 1 ? 'fehlt' : 'fehlen'} noch` +
+      (choose ? ` (${choose} davon bitte unten auswählen)` : ''));
+
+  const notes = [];
+  if (found !== st.expected) notes.push(el('p', { class: 'hint' }, `Auf den Fotos wurden ${found} statt ${st.expected} Karten gefunden.`));
+
+  let perPhotoList = null;
+  if (st.photos.length > 1) {
+    perPhotoList = el('ul', { class: 'stats-photos' }, ...st.photos.map((ps, p) => {
+      const mine = items.filter(it => it.photo === p);
+      const okN = mine.filter(it => itemState(it) === 'ok').length;
+      const bad = okN < ps.expected;
+      let line = ps.error
+        ? `Foto ${p + 1}: konnte nicht geöffnet werden`
+        : `Foto ${p + 1}: ${okN} von ${ps.expected} erkannt`;
+      if (!ps.error && ps.found !== ps.expected) line += ` · ${ps.found} Karten gefunden`;
+      return el('li', {}, el('button', {
+        class: bad ? 'warn' : '',
+        onclick: () => document.getElementById(`photo-group-${p}`)?.scrollIntoView({ behavior: 'smooth' }),
+      }, `${bad ? '⚠️' : '✅'} ${line}`));
+    }));
+  }
+
+  box.replaceChildren(
+    el('div', { class: 'stats-grid' },
+      tile(st.photos.length, st.photos.length === 1 ? 'Foto' : 'Fotos'),
+      tile(st.expected, 'Karten erwartet'),
+      tile(ok, 'erkannt', 'good'),
+      tile(choose, 'bitte auswählen'),
+      tile(missing, 'nicht erkannt', missing ? 'bad' : ''),
+      tile(items.filter(it => it.include && chosenCard(it)).length, 'werden gespeichert')),
+    summary,
+    ...notes,
+    perPhotoList,
+  );
+}
+
 function renderResults() {
   const box = $('#scanResults');
-  box.replaceChildren(...scan.items.map((item, i) => renderResult(item, i)));
+  // Gleiche Karte mehrmals im Stapel?
+  const times = new Map();
+  for (const it of scan.items) if (it.chosenId) times.set(it.chosenId, (times.get(it.chosenId) || 0) + 1);
+  const multi = scan.stats?.photos.length > 1;
+  const nodes = [];
+  scan.items.forEach((item, i) => {
+    if (multi && (i === 0 || scan.items[i - 1].photo !== item.photo)) {
+      nodes.push(el('h3', { class: 'group-head', id: `photo-group-${item.photo}` }, `Foto ${item.photo + 1}`));
+    }
+    nodes.push(renderResult(item, i, times.get(item.chosenId) || 0));
+  });
+  box.replaceChildren(...nodes);
+  renderStats();
   const n = scan.items.filter(it => it.include && it.chosenId).length;
   persistScan('results');
   const btn = $('#scanSave');
@@ -520,9 +791,10 @@ function renderResults() {
   btn.disabled = n === 0;
 }
 
-function renderResult(item, index) {
+function renderResult(item, index, timesInBatch) {
   const card = chosenCard(item);
   const dup = card ? store.findInCollection(card.id) : null;
+  const label = item.slot != null ? `Karte ${item.slot + 1}` : `Karte ${index + 1}`;
   const numberText = item.read.number
     ? `Nr. ${item.read.number}${item.read.total ? '/' + item.read.total : ''}${item.read.setCode ? ' · ' + item.read.setCode : ''}`
     : 'Keine Nummer gelesen';
@@ -533,7 +805,7 @@ function renderResult(item, index) {
   else if (card) status = el('span', { class: 'status ok' }, 'Erkannt');
   else if (item.candidates.length) status = el('span', { class: 'status choose' }, 'Bitte die richtige Karte antippen');
   else status = el('span', { class: 'status fail' }, 'Nicht erkannt');
-
+  const twice = timesInBatch > 1 ? el('span', { class: 'status twice' }, `${timesInBatch}× in diesen Fotos`) : null;
   const actions = [];
   if (card && dup) {
     actions.push(el('button', {
@@ -564,11 +836,11 @@ function renderResult(item, index) {
     : null;
 
   return el('div', { class: 'result' + (item.include && card ? ' selected' : '') + (!item.include ? ' skipped' : ''), 'data-ocr': item.read.rawNumber || '' },
-    el('img', { class: 'crop', src: card?.images?.small || item.thumb, alt: `Karte ${index + 1}` }),
+    el('img', { class: 'crop', src: card?.images?.small || item.thumb, alt: label }),
     el('div', { class: 'info' },
-      el('div', { class: 'title' }, card ? card.name : `Karte ${index + 1}`),
+      el('div', { class: 'title' }, card ? card.name : label),
       el('div', { class: 'meta' }, card ? `${card.set?.name} · ${card.number}/${card.set?.printedTotal} · ${rarityDe(card.rarity)}` : numberText),
-      status,
+      status, twice ? ' ' : null, twice,
       candStrip,
       el('div', { class: 'actions' }, ...actions)));
 }
@@ -709,6 +981,11 @@ function init() {
   $('#cameraClose').addEventListener('click', closeCamera);
   $('#cameraInput').addEventListener('change', onPhoto);
   $('#fileInput').addEventListener('change', onPhoto);
+  $('#addCameraInput').addEventListener('change', onPhoto);
+  $('#addFileInput').addEventListener('change', onPhoto);
+  $('#photoPrev').addEventListener('click', () => showPhoto(scan.current - 1));
+  $('#photoNext').addEventListener('click', () => showPhoto(scan.current + 1));
+  $('#photoRemove').addEventListener('click', askRemovePhoto);
   $('#manualFromScan').addEventListener('click', () => showView('manual'));
   for (const b of document.querySelectorAll('#layoutPicker button')) b.addEventListener('click', () => setLayout(b.dataset.layout));
   const cropCanvas = $('#cropCanvas');

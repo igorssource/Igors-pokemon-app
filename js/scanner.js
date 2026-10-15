@@ -227,6 +227,10 @@ export async function readCard(card) {
     attempts.push(() => prepareForOcr(getWide(), REGION_NUMBER_WIDE, { binarize: 'light' }));
     // Letzter Versuch: ganze Fläche absuchen (Karte liegt z. B. klein in der Mitte des Fotos)
     attempts.push(() => prepareForOcr(getWide(), REGION_ALL, { binarize: 'dark', targetWidth: 2600 }));
+  } else {
+    // Automatisch ausgeschnittene Karte: der Ausschnitt passt genau, nur der Bereich unten etwas größer
+    attempts.push(() => prepareForOcr(card, REGION_NUMBER_WIDE, { binarize: 'dark' }));
+    attempts.push(() => prepareForOcr(card, REGION_NUMBER_WIDE, { binarize: 'light' }));
   }
   let rawNumber = '';
   let parsed = null;
